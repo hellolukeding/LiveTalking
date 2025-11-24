@@ -1,15 +1,16 @@
 import os
+import os.path as osp
+import shutil
+from typing import List, Union
+
 import cv2
 import numpy as np
 import torch
-from typing import Union, List
 import torch.nn.functional as F
 from einops import rearrange
-import shutil
-import os.path as osp
 
+from musetalk.models.unet import PositionalEncoding, UNet
 from musetalk.models.vae import VAE
-from musetalk.models.unet import UNet,PositionalEncoding
 
 
 def load_all_model(
@@ -18,10 +19,20 @@ def load_all_model(
     unet_config=os.path.join("models", "musetalkV15", "musetalk.json"),
     device=None,
 ):
+    vae_path = os.path.join("models", vae_type)
+    if not os.path.exists(vae_path):
+        vae_path = "stabilityai/sd-vae-ft-mse"
+        print(
+            f"Local VAE model not found at {os.path.join('models', vae_type)}, using Hugging Face model: {vae_path}")
+
     vae = VAE(
-        model_path = os.path.join("models", vae_type),
+        model_path=vae_path,
     )
     print(f"load unet model from {unet_model_path}")
+    if not os.path.exists(unet_model_path):
+        raise FileNotFoundError(
+            f"MuseTalk UNet model not found at {unet_model_path}. Please download the models as described in the README.")
+
     unet = UNet(
         unet_config=unet_config,
         model_path=unet_model_path,
@@ -29,6 +40,7 @@ def load_all_model(
     )
     pe = PositionalEncoding(d_model=384)
     return vae, unet, pe
+
 
 def get_file_type(video_path):
     _, ext = os.path.splitext(video_path)
@@ -40,11 +52,13 @@ def get_file_type(video_path):
     else:
         return 'unsupported'
 
+
 def get_video_fps(video_path):
     video = cv2.VideoCapture(video_path)
     fps = video.get(cv2.CAP_PROP_FPS)
     video.release()
     return fps
+
 
 def datagen(
     whisper_chunks,
@@ -55,7 +69,7 @@ def datagen(
 ):
     whisper_batch, latent_batch = [], []
     for i, w in enumerate(whisper_chunks):
-        idx = (i+delay_frame)%len(vae_encode_latents)
+        idx = (i+delay_frame) % len(vae_encode_latents)
         latent = vae_encode_latents[idx]
         whisper_batch.append(w)
         latent_batch.append(latent)
@@ -64,7 +78,7 @@ def datagen(
             whisper_batch = torch.stack(whisper_batch)
             latent_batch = torch.cat(latent_batch, dim=0)
             yield whisper_batch, latent_batch
-            whisper_batch, latent_batch  = [], []
+            whisper_batch, latent_batch = [], []
 
     # the last batch may smaller than batch size
     if len(latent_batch) > 0:
@@ -72,6 +86,7 @@ def datagen(
         latent_batch = torch.cat(latent_batch, dim=0)
 
         yield whisper_batch.to(device), latent_batch.to(device)
+
 
 def cast_training_params(
     model: Union[torch.nn.Module, List[torch.nn.Module]],
@@ -84,6 +99,7 @@ def cast_training_params(
             # only upcast trainable parameters into fp32
             if param.requires_grad:
                 param.data = param.to(dtype)
+
 
 def rand_log_normal(
     shape,
@@ -98,6 +114,7 @@ def rand_log_normal(
         shape, device=device, dtype=dtype, generator=generator)  # N(0, I)
     sigma = (rnd_normal * scale + loc).exp()
     return sigma
+
 
 def get_mouth_region(frames, image_pred, pixel_values_face_mask):
     # Initialize lists to store the results for each image in the batch
@@ -137,6 +154,7 @@ def get_mouth_region(frames, image_pred, pixel_values_face_mask):
 
     return mouth_real, mouth_generated
 
+
 def get_image_pred(pixel_values,
                    ref_pixel_values,
                    audio_prompts,
@@ -174,6 +192,7 @@ def get_image_pred(pixel_values,
 
     return image_pred
 
+
 def process_audio_features(cfg, batch, wav2vec, bsz, num_frames, weight_dtype):
     with torch.no_grad():
         audio_feature_length_per_frame = 2 * \
@@ -182,7 +201,8 @@ def process_audio_features(cfg, batch, wav2vec, bsz, num_frames, weight_dtype):
         audio_feats = batch['audio_feature'].to(weight_dtype)
         audio_feats = wav2vec.encoder(
             audio_feats, output_hidden_states=True).hidden_states
-        audio_feats = torch.stack(audio_feats, dim=2).to(weight_dtype)  # [B, T, 10, 5, 384]
+        audio_feats = torch.stack(audio_feats, dim=2).to(
+            weight_dtype)  # [B, T, 10, 5, 384]
 
         start_ts = batch['audio_offset']
         step_ts = batch['audio_step']
@@ -202,6 +222,7 @@ def process_audio_features(cfg, batch, wav2vec, bsz, num_frames, weight_dtype):
             audio_prompts.append(audio_feats_list)
         audio_prompts = torch.cat(audio_prompts)  # B, T, 10, 5, 384
     return audio_prompts
+
 
 def save_checkpoint(model, save_dir, ckpt_num, name="appearance_net", total_limit=None, logger=None):
     save_path = os.path.join(save_dir, f"{name}-{ckpt_num}.pth")
@@ -231,6 +252,7 @@ def save_checkpoint(model, save_dir, ckpt_num, name="appearance_net", total_limi
     state_dict = model.state_dict()
     torch.save(state_dict, save_path)
 
+
 def save_models(accelerator, net, save_dir, global_step, cfg, logger=None):
     unwarp_net = accelerator.unwrap_model(net)
     save_checkpoint(
@@ -242,6 +264,7 @@ def save_models(accelerator, net, save_dir, global_step, cfg, logger=None):
         logger=logger
     )
 
+
 def delete_additional_ckpt(base_path, num_keep):
     dirs = []
     for d in os.listdir(base_path):
@@ -251,11 +274,13 @@ def delete_additional_ckpt(base_path, num_keep):
     if num_tot <= num_keep:
         return
     # ensure ckpt is sorted and delete the ealier!
-    del_dirs = sorted(dirs, key=lambda x: int(x.split("-")[-1]))[: num_tot - num_keep]
+    del_dirs = sorted(dirs, key=lambda x: int(
+        x.split("-")[-1]))[: num_tot - num_keep]
     for d in del_dirs:
         path_to_dir = osp.join(base_path, d)
         if osp.exists(path_to_dir):
             shutil.rmtree(path_to_dir)
+
 
 def seed_everything(seed):
     import random
@@ -267,8 +292,9 @@ def seed_everything(seed):
     np.random.seed(seed % (2**32))
     random.seed(seed)
 
+
 def process_and_save_images(
-    batch, 
+    batch,
     image_pred,
     image_pred_infer,
     save_dir,
@@ -279,41 +305,47 @@ def process_and_save_images(
 ):
     # Rearrange the tensors
     print("image_pred.shape: ", image_pred.shape)
-    pixel_values_ref_img = rearrange(batch['pixel_values_ref_img'], "b f c h w -> (b f) c h w")
-    pixel_values = rearrange(batch["pixel_values_vid"], 'b f c h w -> (b f) c h w')
-    
+    pixel_values_ref_img = rearrange(
+        batch['pixel_values_ref_img'], "b f c h w -> (b f) c h w")
+    pixel_values = rearrange(
+        batch["pixel_values_vid"], 'b f c h w -> (b f) c h w')
+
     # Create masked pixel values
     masked_pixel_values = batch["pixel_values_vid"].clone()
     _, _, _, h, _ = batch["pixel_values_vid"].shape
     masked_pixel_values[:, :, :, h//2:, :] = -1
-    masked_pixel_values = rearrange(masked_pixel_values, 'b f c h w -> (b f) c h w')
-    
+    masked_pixel_values = rearrange(
+        masked_pixel_values, 'b f c h w -> (b f) c h w')
+
     # Keep only the specified number of images
     pixel_values = pixel_values[:num_images_to_keep, :, :, :]
     masked_pixel_values = masked_pixel_values[:num_images_to_keep, :, :, :]
     pixel_values_ref_img = pixel_values_ref_img[:num_images_to_keep, :, :, :]
     image_pred = image_pred.detach()[:num_images_to_keep, :, :, :]
     image_pred_infer = image_pred_infer.detach()[:num_images_to_keep, :, :, :]
-    
+
     # Concatenate images
     concat = torch.cat([
-        masked_pixel_values * 0.5 + 0.5, 
+        masked_pixel_values * 0.5 + 0.5,
         pixel_values_ref_img * 0.5 + 0.5,
         image_pred * 0.5 + 0.5,
         pixel_values * 0.5 + 0.5,
         image_pred_infer * 0.5 + 0.5,
     ], dim=2)
     print("concat.shape: ", concat.shape)
-    
+
     # Create the save directory if it doesn't exist
     os.makedirs(f'{save_dir}/samples/', exist_ok=True)
 
     # Try to save the concatenated image
     try:
         # Concatenate images horizontally and convert to numpy array
-        final_image = torch.cat([concat[i] for i in range(concat.shape[0])], dim=-1).permute(1, 2, 0).cpu().numpy()[:, :, [2, 1, 0]] * 255
+        final_image = torch.cat([concat[i] for i in range(
+            concat.shape[0])], dim=-1).permute(1, 2, 0).cpu().numpy()[:, :, [2, 1, 0]] * 255
         # Save the image
-        cv2.imwrite(f'{save_dir}/samples/sample_{global_step}_{accelerator.device}_SyncNetScore_{syncnet_score}.jpg', final_image)
-        print(f"Image saved successfully: {save_dir}/samples/sample_{global_step}_{accelerator.device}_SyncNetScore_{syncnet_score}.jpg")
+        cv2.imwrite(
+            f'{save_dir}/samples/sample_{global_step}_{accelerator.device}_SyncNetScore_{syncnet_score}.jpg', final_image)
+        print(
+            f"Image saved successfully: {save_dir}/samples/sample_{global_step}_{accelerator.device}_SyncNetScore_{syncnet_score}.jpg")
     except Exception as e:
         print(f"Failed to save image: {e}")

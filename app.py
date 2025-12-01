@@ -15,38 +15,43 @@
 #  limitations under the License.
 ###############################################################################
 
+from webrtc import HumanPlayer
+from logger import logger
+from llm import llm_response
+from basereal import BaseReal
+from flask_sockets import Sockets
+from flask import Flask, jsonify, render_template, request, send_from_directory
+from aiortc.rtcrtpsender import RTCRtpSender
+from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
+                    RTCSessionDescription)
+from aiohttp import web
+import torch.multiprocessing as mp
+import torch
+import numpy as np
+import aiohttp_cors
+import aiohttp
+from typing import Dict
+from threading import Event, Thread
+import shutil
+import re
+import random
+import json
+import gc
 import argparse
 import asyncio
 import base64
-import gc
-import json
-import random
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # import gevent
 # from gevent import pywsgi
 # from geventwebsocket.handler import WebSocketHandler
-import re
-import shutil
-from threading import Event, Thread
-from typing import Dict
 
-import aiohttp
-import aiohttp_cors
-import numpy as np
-import torch
 # import multiprocessing
-import torch.multiprocessing as mp
-from aiohttp import web
-from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
-                    RTCSessionDescription)
-from aiortc.rtcrtpsender import RTCRtpSender
 # server.py
-from flask import Flask, jsonify, render_template, request, send_from_directory
-from flask_sockets import Sockets
 
-from basereal import BaseReal
-from llm import llm_response
-from logger import logger
-from webrtc import HumanPlayer
 
 app = Flask(__name__)
 # sockets = Sockets(app)

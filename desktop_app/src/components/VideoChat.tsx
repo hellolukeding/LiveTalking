@@ -1,5 +1,5 @@
 import { PlayCircleOutlined, PoweroffOutlined } from '@ant-design/icons';
-import { Button, message } from 'antd';
+import { Button, message, Switch } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { negotiateOffer, sendHumanMessage } from '../api';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
@@ -13,6 +13,69 @@ export default function VideoChat() {
     const audioRef = useRef<HTMLAudioElement>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const [isVoiceChatOn, setIsVoiceChatOn] = useState(false);
+    const recognitionRef = useRef<any>(null);
+
+    useEffect(() => {
+        if (isVoiceChatOn && isStarted) {
+            const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                message.error('您的浏览器不支持语音识别');
+                setIsVoiceChatOn(false);
+                return;
+            }
+            const recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = false;
+            recognition.lang = 'zh-CN';
+
+            recognition.onresult = (event: any) => {
+                const last = event.results.length - 1;
+                const text = event.results[last][0].transcript;
+                if (text && text.trim()) {
+                    handleSendMessage(text.trim());
+                }
+            };
+
+            recognition.onerror = (event: any) => {
+                console.error('Speech recognition error', event.error);
+            };
+
+            recognition.onend = () => {
+                // Check ref to ensure we still want to be running
+                if (isVoiceChatOn && isStarted && recognitionRef.current) {
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        console.error('Failed to restart recognition', e);
+                    }
+                }
+            };
+
+            try {
+                recognition.start();
+                recognitionRef.current = recognition;
+                message.success('语音识别已开启');
+            } catch (e) {
+                console.error(e);
+                message.error('无法开启语音识别');
+                setIsVoiceChatOn(false);
+            }
+        } else {
+            if (recognitionRef.current) {
+                recognitionRef.current.stop();
+                recognitionRef.current = null;
+            }
+        }
+
+        return () => {
+            if (recognitionRef.current) {
+                recognitionRef.current.stop();
+                recognitionRef.current = null;
+            }
+        };
+    }, [isVoiceChatOn, isStarted]);
 
     const resetTimer = () => {
         if (timerRef.current) clearTimeout(timerRef.current);
@@ -33,6 +96,28 @@ export default function VideoChat() {
 
         const pc = new RTCPeerConnection(config);
         pcRef.current = pc;
+
+        const dc = pc.createDataChannel("chat");
+        dc.onmessage = (event) => {
+            const text = event.data;
+            if (text) {
+                setChatHistory(prev => {
+                    const lastMsg = prev[prev.length - 1];
+                    if (lastMsg && lastMsg.role === 'assistant') {
+                        return [
+                            ...prev.slice(0, -1),
+                            { ...lastMsg, content: lastMsg.content + text }
+                        ];
+                    } else {
+                        return [...prev, {
+                            role: 'assistant',
+                            content: text,
+                            timestamp: Date.now()
+                        }];
+                    }
+                });
+            }
+        };
 
         pc.addEventListener('iceconnectionstatechange', () => {
             console.log('ICE Connection State:', pc.iceConnectionState);
@@ -166,7 +251,7 @@ export default function VideoChat() {
                 <audio ref={audioRef} autoPlay />
 
                 {/* Controls Overlay */}
-                <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-30">
+                <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-30 flex items-center gap-4 bg-gray-900/60 p-4 rounded-2xl backdrop-blur-md border border-white/10">
                     <Button
                         type={isStarted ? "primary" : "default"}
                         danger={isStarted}
@@ -178,6 +263,14 @@ export default function VideoChat() {
                     >
                         {isStarted ? '断开连接' : '开始连接'}
                     </Button>
+                    <div className="flex items-center gap-2 text-white border-l border-white/20 pl-4">
+                        <span className="text-sm font-medium">语音对话</span>
+                        <Switch
+                            checked={isVoiceChatOn}
+                            onChange={setIsVoiceChatOn}
+                            className="bg-gray-600"
+                        />
+                    </div>
                 </div>
             </div>
 

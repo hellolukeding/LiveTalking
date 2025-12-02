@@ -25,43 +25,58 @@ export default function VideoChat() {
                 setIsVoiceChatOn(false);
                 return;
             }
-            const recognition = new SpeechRecognition();
-            recognition.continuous = true;
-            recognition.interimResults = false;
-            recognition.lang = 'zh-CN';
 
-            recognition.onresult = (event: any) => {
-                const last = event.results.length - 1;
-                const text = event.results[last][0].transcript;
-                if (text && text.trim()) {
-                    handleSendMessage(text.trim());
-                }
-            };
+            // Request microphone permission explicitly
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(() => {
+                    console.log('Microphone permission granted');
+                    const recognition = new SpeechRecognition();
+                    recognition.continuous = true;
+                    recognition.interimResults = false;
+                    recognition.lang = 'zh-CN';
 
-            recognition.onerror = (event: any) => {
-                console.error('Speech recognition error', event.error);
-            };
+                    recognition.onresult = (event: any) => {
+                        const last = event.results.length - 1;
+                        const text = event.results[last][0].transcript;
+                        if (text && text.trim()) {
+                            handleSendMessage(text.trim());
+                        }
+                    };
 
-            recognition.onend = () => {
-                // Check ref to ensure we still want to be running
-                if (isVoiceChatOn && isStarted && recognitionRef.current) {
+                    recognition.onerror = (event: any) => {
+                        console.error('Speech recognition error', event.error);
+                        if (event.error === 'not-allowed') {
+                            message.error('语音识别权限被拒绝');
+                            setIsVoiceChatOn(false);
+                        }
+                    };
+
+                    recognition.onend = () => {
+                        // Check ref to ensure we still want to be running
+                        if (isVoiceChatOn && isStarted && recognitionRef.current) {
+                            try {
+                                recognition.start();
+                            } catch (e) {
+                                console.error('Failed to restart recognition', e);
+                            }
+                        }
+                    };
+
                     try {
                         recognition.start();
+                        recognitionRef.current = recognition;
+                        message.success('语音识别已开启');
                     } catch (e) {
-                        console.error('Failed to restart recognition', e);
+                        console.error(e);
+                        message.error('无法开启语音识别');
+                        setIsVoiceChatOn(false);
                     }
-                }
-            };
-
-            try {
-                recognition.start();
-                recognitionRef.current = recognition;
-                message.success('语音识别已开启');
-            } catch (e) {
-                console.error(e);
-                message.error('无法开启语音识别');
-                setIsVoiceChatOn(false);
-            }
+                })
+                .catch((err) => {
+                    console.error('Microphone permission denied', err);
+                    message.error('无法获取麦克风权限');
+                    setIsVoiceChatOn(false);
+                });
         } else {
             if (recognitionRef.current) {
                 recognitionRef.current.stop();

@@ -109,9 +109,24 @@ class BaseReal:
         self.custom_index = {}
         self.custom_opt = {}
         self.__loadcustom()
+        self.datachannel = None
+        self.loop = None
+
+    def send_custom_msg(self, msg):
+        if self.datachannel:
+            logger.info(
+                f"Sending custom msg: {msg}, state: {self.datachannel.readyState}")
+            if self.datachannel.readyState == "open":
+                if self.loop:
+                    self.loop.call_soon_threadsafe(self.datachannel.send, msg)
+                else:
+                    self.datachannel.send(msg)
+        else:
+            logger.info(f"No datachannel to send msg: {msg}")
 
     def put_msg_txt(self, msg, datainfo: dict = {}):
         self.tts.put_msg_txt(msg, datainfo)
+        self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
         self.asr.put_audio_frame(audio_chunk, datainfo)

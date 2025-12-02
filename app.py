@@ -15,33 +15,34 @@
 #  limitations under the License.
 ###############################################################################
 
-from webrtc import HumanPlayer
-from logger import logger
-from llm import llm_response
-from basereal import BaseReal
-from flask_sockets import Sockets
-from flask import Flask, jsonify, render_template, request, send_from_directory
-from aiortc.rtcrtpsender import RTCRtpSender
-from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
-                    RTCSessionDescription)
-from aiohttp import web
-import torch.multiprocessing as mp
-import torch
-import numpy as np
-import aiohttp_cors
-import aiohttp
-from typing import Dict
-from threading import Event, Thread
-import shutil
-import re
-import random
-import json
-import gc
 import argparse
 import asyncio
 import base64
+import gc
+import json
+import random
+import re
+import shutil
+from threading import Event, Thread
+from typing import Dict
 
+import aiohttp
+import aiohttp_cors
+import numpy as np
+import torch
+import torch.multiprocessing as mp
+from aiohttp import web
+from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
+                    RTCSessionDescription)
+from aiortc.rtcrtpsender import RTCRtpSender
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask_sockets import Sockets
+
+from basereal import BaseReal
+from llm import llm_response
+from logger import logger
+from webrtc import HumanPlayer
 
 load_dotenv()
 
@@ -115,6 +116,12 @@ async def offer(request):
         configuration=RTCConfiguration(iceServers=[ice_server]))
     pcs.add(pc)
 
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        logger.info("Data channel is %s", channel.label)
+        nerfreals[sessionid].datachannel = channel
+        nerfreals[sessionid].loop = asyncio.get_event_loop()
+
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         logger.info("Connection state is %s" % pc.connectionState)
@@ -157,7 +164,7 @@ async def human(request):
     try:
         params = await request.json()
 
-        sessionid = params.get('sessionid', 0)
+        sessionid = int(params.get('sessionid', 0))
         if params.get('interrupt'):
             nerfreals[sessionid].flush_talk()
 

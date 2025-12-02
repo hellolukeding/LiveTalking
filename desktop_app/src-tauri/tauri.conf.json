@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "livetalking-pc",
-        "width": 800,
-        "height": 600
+        "width": 1280,
+        "height": 960
       }
     ],
     "security": {
@@ -30,6 +30,17 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "languages": ["SimpChinese"]
+      }
+    }
   }
 }

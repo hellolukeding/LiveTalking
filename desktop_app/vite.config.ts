@@ -30,10 +30,10 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
     proxy: {
-      '/offer': 'http://localhost:8000',
-      '/human': 'http://localhost:8000',
-      '/record': 'http://localhost:8000',
-      '/is_speaking': 'http://localhost:8000',
+      '/offer': 'http://localhost:8010',
+      '/human': 'http://localhost:8010',
+      '/record': 'http://localhost:8010',
+      '/is_speaking': 'http://localhost:8010',
     },
   },
 }));

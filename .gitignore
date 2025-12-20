@@ -21,3 +21,4 @@ models/
 dist
 
 **/*/node_modules/
+results/

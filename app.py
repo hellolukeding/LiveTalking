@@ -93,101 +93,416 @@ def build_nerfreal(sessionid: int) -> BaseReal:
 
 
 async def offer(request):
-    params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    try:
+        params = await request.json()
+        logger.info(f"[OFFER] Received offer request: {params}")
 
-    # if len(nerfreals) >= opt.max_session:
-    #     logger.info('reach max session')
-    #     return web.Response(
-    #         content_type="application/json",
-    #         text=json.dumps(
-    #             {"code": -1, "msg": "reach max session"}
-    #         ),
-    #     )
-    sessionid = randN(6)  # len(nerfreals)
-    nerfreals[sessionid] = None
-    logger.info('sessionid=%d, session num=%d', sessionid, len(nerfreals))
-    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
-    nerfreals[sessionid] = nerfreal
+        if not params or 'sdp' not in params or 'type' not in params:
+            logger.error("[OFFER] Invalid request parameters")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": "Invalid request: missing sdp or type"}),
+                status=400
+            )
 
-    ice_server = RTCIceServer(urls='stun:stun.l.google.com:19302')
-    # ice_server = RTCIceServer(urls='stun:stun.miwifi.com:3478')
-    pc = RTCPeerConnection(
-        configuration=RTCConfiguration(iceServers=[ice_server]))
-    pcs.add(pc)
+        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+        logger.info(
+            f"[OFFER] Created RTCSessionDescription: type={params['type']}")
 
-    @pc.on("datachannel")
-    def on_datachannel(channel):
-        logger.info("Data channel is %s", channel.label)
-        nerfreals[sessionid].datachannel = channel
-        nerfreals[sessionid].loop = asyncio.get_event_loop()
+        # Check session limit
+        if len(nerfreals) >= opt.max_session:
+            logger.warning(
+                f"[OFFER] Max session limit reached: {len(nerfreals)} >= {opt.max_session}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "reach max session"}),
+                status=429
+            )
 
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        logger.info("Connection state is %s" % pc.connectionState)
-        if pc.connectionState == "failed":
-            await pc.close()
-            pcs.discard(pc)
-            del nerfreals[sessionid]
-        if pc.connectionState == "closed":
-            pcs.discard(pc)
-            del nerfreals[sessionid]
-            # gc.collect()
+        sessionid = randN(6)
+        logger.info(f"[OFFER] Generating session ID: {sessionid}")
 
-    player = HumanPlayer(nerfreals[sessionid])
-    audio_sender = pc.addTrack(player.audio)
-    video_sender = pc.addTrack(player.video)
-    capabilities = RTCRtpSender.getCapabilities("video")
-    preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
-    preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
-    preferences += list(filter(lambda x: x.name == "rtx", capabilities.codecs))
-    transceiver = pc.getTransceivers()[1]
-    transceiver.setCodecPreferences(preferences)
+        # Initialize session with error handling
+        try:
+            nerfreals[sessionid] = None
+            logger.info(f"[OFFER] Building nerfreal for session {sessionid}")
 
-    await pc.setRemoteDescription(offer)
+            # Build nerfreal in executor to avoid blocking
+            nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
 
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
+            if nerfreal is None:
+                raise RuntimeError("Failed to build nerfreal instance")
 
-    # return jsonify({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+            nerfreals[sessionid] = nerfreal
+            logger.info(
+                f"[OFFER] Nerfreal built successfully for session {sessionid}")
 
-    return web.Response(
-        content_type="application/json",
-        text=json.dumps(
-            {"sdp": pc.localDescription.sdp,
-                "type": pc.localDescription.type, "sessionid": sessionid}
-        ),
-    )
+        except Exception as e:
+            logger.error(f"[OFFER] Failed to build nerfreal: {str(e)}")
+            if sessionid in nerfreals:
+                del nerfreals[sessionid]
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Failed to initialize session: {str(e)}"}),
+                status=500
+            )
+
+        # Create WebRTC peer connection
+        try:
+            ice_server = RTCIceServer(urls='stun:stun.l.google.com:19302')
+            pc = RTCPeerConnection(
+                configuration=RTCConfiguration(iceServers=[ice_server]))
+            pcs.add(pc)
+            logger.info(
+                f"[OFFER] WebRTC peer connection created for session {sessionid}")
+
+        except Exception as e:
+            logger.error(f"[OFFER] Failed to create peer connection: {str(e)}")
+            if sessionid in nerfreals:
+                del nerfreals[sessionid]
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Failed to create peer connection: {str(e)}"}),
+                status=500
+            )
+
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            logger.info(
+                f"[WEBRTC] Data channel created: {channel.label} for session {sessionid}")
+            try:
+                nerfreals[sessionid].datachannel = channel
+                nerfreals[sessionid].loop = asyncio.get_event_loop()
+                logger.info(
+                    f"[WEBRTC] Data channel initialized for session {sessionid}")
+            except Exception as e:
+                logger.error(
+                    f"[WEBRTC] Failed to initialize data channel: {str(e)}")
+
+        @pc.on("track")
+        def on_track(track):
+            logger.info(
+                f"[WEBRTC] Track received: {track.kind} for session {sessionid}")
+            if track.kind == "audio":
+                logger.info(
+                    f"[WEBRTC] Audio track received for session {sessionid}")
+                # 将接收到的音频传递给ASR系统
+
+                @track.on("ended")
+                def on_ended():
+                    logger.info(
+                        f"[WEBRTC] Audio track ended for session {sessionid}")
+
+                # 处理接收到的音频帧
+                async def process_audio_frames():
+                    try:
+                        while True:
+                            frame = await track.recv()
+                            # 将AudioFrame转换为numpy数组
+                            if hasattr(frame, 'to_ndarray'):
+                                audio_array = frame.to_ndarray()
+                                # 转换为单声道和float32格式
+                                if audio_array.ndim > 1:
+                                    audio_array = audio_array[:, 0]
+                                audio_array = audio_array.astype(np.float32)
+
+                                # 传递给ASR系统
+                                if hasattr(nerfreals[sessionid], 'add_asr_audio'):
+                                    # 传递给LipReal的ASR缓冲区（用于文本识别）
+                                    nerfreals[sessionid].add_asr_audio(
+                                        audio_array)
+                                elif hasattr(nerfreals[sessionid], 'lip_asr'):
+                                    # 传递给LipASR用于口型驱动
+                                    nerfreals[sessionid].lip_asr.put_audio_frame(
+                                        audio_array, {})
+                                elif hasattr(nerfreals[sessionid], 'asr'):
+                                    # 传递给其他ASR实现（如MuseASR）
+                                    nerfreals[sessionid].asr.put_audio_frame(
+                                        audio_array, {})
+                    except Exception as e:
+                        logger.error(
+                            f"[WEBRTC] Error processing audio frames: {str(e)}")
+
+                # 启动音频处理任务
+                asyncio.create_task(process_audio_frames())
+            else:
+                logger.warning(
+                    f"[WEBRTC] Received non-audio track: {track.kind}")
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            logger.info(
+                f"[WEBRTC] Connection state changed: {pc.connectionState} for session {sessionid}")
+            if pc.connectionState == "failed":
+                logger.error(
+                    f"[WEBRTC] Connection failed for session {sessionid}")
+                try:
+                    await pc.close()
+                    pcs.discard(pc)
+                    if sessionid in nerfreals:
+                        del nerfreals[sessionid]
+                    logger.info(
+                        f"[WEBRTC] Cleaned up failed session {sessionid}")
+                except Exception as e:
+                    logger.error(
+                        f"[WEBRTC] Error cleaning up failed session: {str(e)}")
+            elif pc.connectionState == "closed":
+                logger.info(
+                    f"[WEBRTC] Connection closed for session {sessionid}")
+                try:
+                    pcs.discard(pc)
+                    if sessionid in nerfreals:
+                        del nerfreals[sessionid]
+                    logger.info(
+                        f"[WEBRTC] Cleaned up closed session {sessionid}")
+                except Exception as e:
+                    logger.error(
+                        f"[WEBRTC] Error cleaning up closed session: {str(e)}")
+
+        # Create tracks
+        try:
+            logger.info(
+                f"[OFFER] Creating media tracks for session {sessionid}")
+            player = HumanPlayer(nerfreals[sessionid])
+            audio_sender = pc.addTrack(player.audio)
+            video_sender = pc.addTrack(player.video)
+            logger.info(
+                f"[OFFER] Media tracks created successfully for session {sessionid}")
+
+        except Exception as e:
+            logger.error(f"[OFFER] Failed to create media tracks: {str(e)}")
+            try:
+                await pc.close()
+                pcs.discard(pc)
+                if sessionid in nerfreals:
+                    del nerfreals[sessionid]
+            except:
+                pass
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Failed to create media tracks: {str(e)}"}),
+                status=500
+            )
+
+        # Configure codec preferences
+        try:
+            capabilities = RTCRtpSender.getCapabilities("video")
+            preferences = list(
+                filter(lambda x: x.name == "H264", capabilities.codecs))
+            preferences += list(filter(lambda x: x.name ==
+                                "VP8", capabilities.codecs))
+            preferences += list(filter(lambda x: x.name ==
+                                "rtx", capabilities.codecs))
+            transceiver = pc.getTransceivers()[1]
+            transceiver.setCodecPreferences(preferences)
+            logger.info(
+                f"[OFFER] Codec preferences configured for session {sessionid}")
+        except Exception as e:
+            logger.warning(
+                f"[OFFER] Failed to configure codec preferences: {str(e)}")
+
+        # Set remote description
+        try:
+            logger.info(
+                f"[OFFER] Setting remote description for session {sessionid}")
+            await pc.setRemoteDescription(offer)
+            logger.info(
+                f"[OFFER] Remote description set successfully for session {sessionid}")
+        except Exception as e:
+            logger.error(f"[OFFER] Failed to set remote description: {str(e)}")
+            try:
+                await pc.close()
+                pcs.discard(pc)
+                if sessionid in nerfreals:
+                    del nerfreals[sessionid]
+            except:
+                pass
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Failed to set remote description: {str(e)}"}),
+                status=500
+            )
+
+        # Create and set local description
+        try:
+            logger.info(f"[OFFER] Creating answer for session {sessionid}")
+            answer = await pc.createAnswer()
+            logger.info(
+                f"[OFFER] Setting local description for session {sessionid}")
+            await pc.setLocalDescription(answer)
+            logger.info(
+                f"[OFFER] Local description set successfully for session {sessionid}")
+
+        except Exception as e:
+            logger.error(f"[OFFER] Failed to create/answer: {str(e)}")
+            try:
+                await pc.close()
+                pcs.discard(pc)
+                if sessionid in nerfreals:
+                    del nerfreals[sessionid]
+            except:
+                pass
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Failed to create answer: {str(e)}"}),
+                status=500
+            )
+
+        logger.info(f"[OFFER] Session {sessionid} established successfully")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({
+                "sdp": pc.localDescription.sdp,
+                "type": pc.localDescription.type,
+                "sessionid": sessionid,
+                "code": 0
+            }),
+        )
+
+    except Exception as e:
+        logger.exception(f"[OFFER] Unexpected error: {str(e)}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps(
+                {"code": -1, "msg": f"Unexpected error: {str(e)}"}),
+            status=500
+        )
 
 
 async def human(request):
     try:
         params = await request.json()
+        logger.info(f"[HUMAN] Received human request: {params}")
 
-        sessionid = int(params.get('sessionid', 0))
+        # Validate request parameters
+        if not params:
+            logger.error("[HUMAN] Empty request body")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Empty request body"}),
+                status=400
+            )
+
+        sessionid = params.get('sessionid', 0)
+        if not sessionid or sessionid not in nerfreals:
+            logger.error(f"[HUMAN] Invalid session ID: {sessionid}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Invalid or missing session ID: {sessionid}"}),
+                status=400
+            )
+
+        # Check if nerfreal is properly initialized
+        nerfreal = nerfreals.get(sessionid)
+        if nerfreal is None:
+            logger.error(
+                f"[HUMAN] Nerfreal not initialized for session {sessionid}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Nerfreal not initialized for session {sessionid}"}),
+                status=500
+            )
+
+        # Handle interrupt
         if params.get('interrupt'):
-            nerfreals[sessionid].flush_talk()
+            logger.info(f"[HUMAN] Interrupting talk for session {sessionid}")
+            try:
+                nerfreal.flush_talk()
+            except Exception as e:
+                logger.error(f"[HUMAN] Failed to interrupt talk: {str(e)}")
 
-        if params['type'] == 'echo':
-            nerfreals[sessionid].put_msg_txt(params['text'])
-        elif params['type'] == 'chat':
-            asyncio.get_event_loop().run_in_executor(
-                None, llm_response, params['text'], nerfreals[sessionid])
-            # nerfreals[sessionid].put_msg_txt(res)
+        # Handle different message types
+        msg_type = params.get('type', 'echo')
+        text = params.get('text', '')
 
+        if not text:
+            logger.warning(f"[HUMAN] Empty text in request")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Empty text"}),
+                status=400
+            )
+
+        logger.info(
+            f"[HUMAN] Processing {msg_type} message for session {sessionid}: {text}")
+
+        if msg_type == 'echo':
+            try:
+                nerfreal.put_msg_txt(text)
+                logger.info(
+                    f"[HUMAN] Echo message queued successfully for session {sessionid}")
+            except Exception as e:
+                logger.error(f"[HUMAN] Failed to queue echo message: {str(e)}")
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps(
+                        {"code": -1, "msg": f"Failed to queue echo message: {str(e)}"}),
+                    status=500
+                )
+
+        elif msg_type == 'chat':
+            try:
+                # Check if LLM is configured
+                from llm import get_api_config
+                api_key, base_url, model = get_api_config()
+                if not api_key or not base_url:
+                    logger.error("[HUMAN] LLM API not configured")
+                    return web.Response(
+                        content_type="application/json",
+                        text=json.dumps(
+                            {"code": -1, "msg": "LLM API not configured"}),
+                        status=500
+                    )
+
+                # Run LLM response in executor
+                logger.info(
+                    f"[HUMAN] Starting LLM response for session {sessionid}")
+                asyncio.get_event_loop().run_in_executor(
+                    None, llm_response, text, nerfreal)
+
+                logger.info(
+                    f"[HUMAN] LLM response queued successfully for session {sessionid}")
+
+            except Exception as e:
+                logger.error(f"[HUMAN] Failed to queue LLM response: {str(e)}")
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps(
+                        {"code": -1, "msg": f"Failed to process chat message: {str(e)}"}),
+                    status=500
+                )
+
+        else:
+            logger.warning(f"[HUMAN] Unknown message type: {msg_type}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps(
+                    {"code": -1, "msg": f"Unknown message type: {msg_type}"}),
+                status=400
+            )
+
+        logger.info(
+            f"[HUMAN] Request processed successfully for session {sessionid}")
         return web.Response(
             content_type="application/json",
-            text=json.dumps(
-                {"code": 0, "msg": "ok"}
-            ),
+            text=json.dumps({"code": 0, "msg": "ok"}),
         )
+
     except Exception as e:
-        logger.exception('exception:')
+        logger.exception(f"[HUMAN] Unexpected error: {str(e)}")
         return web.Response(
             content_type="application/json",
             text=json.dumps(
-                {"code": -1, "msg": str(e)}
-            ),
+                {"code": -1, "msg": f"Unexpected error: {str(e)}"}),
+            status=500
         )
 
 

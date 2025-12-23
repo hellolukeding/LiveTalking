@@ -149,7 +149,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
             frame, type, eventpoint = audio_out_queue.get()
             audio_frames.append((frame, type, eventpoint))
             if type == 0:
-                is_all_silence = False
+                is_all_silence = False  # 修复拼写错误
 
         if is_all_silence:
             for i in range(batch_size):
@@ -223,6 +223,10 @@ class LipReal(BaseReal):
         # 新增腾讯ASR用于文本识别
         self.tencent_asr = TencentApiAsr(opt, self)
 
+        # ASR音频收集缓冲区
+        self.asr_audio_buffer = []
+        self.asr_buffer_lock = mp.Lock()
+
         self.render_event = mp.Event()
 
     # def __del__(self):
@@ -271,11 +275,24 @@ class LipReal(BaseReal):
 
         import soundfile as sf
 
-        # 计算需要收集的帧数
+        # 优先使用WebRTC音频缓冲区
+        with self.asr_buffer_lock:
+            if len(self.asr_audio_buffer) > 0:
+                # 从缓冲区收集音频
+                samples_needed = int(16000 * duration_ms / 1000)
+                audio_data = np.array(
+                    self.asr_audio_buffer[:samples_needed], dtype=np.float32)
+                self.asr_audio_buffer = self.asr_audio_buffer[samples_needed:]
+
+                # 转换为WAV格式
+                buffer = io.BytesIO()
+                sf.write(buffer, audio_data, 16000, format='WAV')
+                return buffer.getvalue()
+
+        # 如果缓冲区为空，从LipASR输出队列收集
         frames_needed = int(duration_ms / 20)  # 每帧20ms
         audio_frames = []
 
-        # 从音频队列中收集帧
         for _ in range(frames_needed):
             try:
                 frame, type, _ = self.lip_asr.output_queue.get(timeout=0.1)
@@ -294,6 +311,19 @@ class LipReal(BaseReal):
         buffer = io.BytesIO()
         sf.write(buffer, audio_data, 16000, format='WAV')
         return buffer.getvalue()
+
+    def add_asr_audio(self, audio_frame: np.ndarray):
+        """
+        添加音频帧到ASR缓冲区
+        Args:
+            audio_frame: 音频帧 (numpy数组)
+        """
+        with self.asr_buffer_lock:
+            self.asr_audio_buffer.extend(audio_frame.tolist())
+            # 限制缓冲区大小为最多10秒的音频
+            max_buffer_size = 16000 * 10
+            if len(self.asr_audio_buffer) > max_buffer_size:
+                self.asr_audio_buffer = self.asr_audio_buffer[-max_buffer_size:]
 
     def render(self, quit_event, loop=None, audio_track=None, video_track=None):
         # if self.opt.asr:

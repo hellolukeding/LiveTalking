@@ -335,6 +335,11 @@ class BaseReal:
             self.custom_index[audiotype] = 0
 
     def process_frames(self, quit_event, loop=None, audio_track=None, video_track=None):
+        logger.info(
+            f"[PROCESS_FRAMES] Starting process_frames for session {self.sessionid}")
+        logger.info(
+            f"[PROCESS_FRAMES] Transport: {self.opt.transport}, Loop: {loop is not None}")
+
         enable_transition = False  # 设置为False禁用过渡效果，True启用
 
         if enable_transition:
@@ -345,6 +350,7 @@ class BaseReal:
             _last_speaking_frame = None  # 说话帧缓存
 
         if self.opt.transport == 'virtualcam':
+            logger.info(f"[PROCESS_FRAMES] Using virtualcam transport")
             import pyvirtualcam
             vircam = None
 
@@ -352,13 +358,47 @@ class BaseReal:
             audio_thread = Thread(target=play_audio, args=(
                 quit_event, audio_tmp,), daemon=True, name="pyaudio_stream")
             audio_thread.start()
+        else:
+            logger.info(f"[PROCESS_FRAMES] Using WebRTC transport")
+            if audio_track is None:
+                logger.error("[PROCESS_FRAMES] Audio track is None!")
+            if video_track is None:
+                logger.error("[PROCESS_FRAMES] Video track is None!")
+            if loop is None:
+                logger.error("[PROCESS_FRAMES] Event loop is None!")
+
+        frame_count = 0
+        last_log_time = time.time()
 
         while not quit_event.is_set():
             try:
                 res_frame, idx, audio_frames = self.res_frame_queue.get(
                     block=True, timeout=1)
+                frame_count += 1
+
+                # Log frame processing status every 2 seconds
+                if time.time() - last_log_time > 2:
+                    logger.info(
+                        f"[PROCESS_FRAMES] Processing frames: count={frame_count}, session={self.sessionid}")
+                    logger.info(
+                        f"[PROCESS_FRAMES] Audio queue size: {self.res_frame_queue.qsize()}")
+                    last_log_time = time.time()
+                    frame_count = 0
+
             except queue.Empty:
+                logger.debug(
+                    f"[PROCESS_FRAMES] Queue empty, waiting for frames...")
                 continue
+            except Exception as e:
+                logger.error(
+                    f"[PROCESS_FRAMES] Error getting frame from queue: {str(e)}")
+                continue
+
+            # Log audio frame info
+            if audio_frames and len(audio_frames) > 0:
+                audio_info = [(f"frame_{i}", type, eventpoint)
+                              for i, (frame, type, eventpoint) in enumerate(audio_frames)]
+                logger.debug(f"[PROCESS_FRAMES] Audio frames: {audio_info}")
 
             if enable_transition:
                 # 检测状态变化
@@ -366,20 +406,29 @@ class BaseReal:
                     audio_frames[0][1] != 0 and audio_frames[1][1] != 0)
                 if current_speaking != _last_speaking:
                     logger.info(
-                        f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
+                        f"[PROCESS_FRAMES] 状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                     _transition_start = time.time()
                 _last_speaking = current_speaking
 
             if audio_frames[0][1] != 0 and audio_frames[1][1] != 0:  # 全为静音数据，只需要取fullimg
                 self.speaking = False
                 audiotype = audio_frames[0][1]
+
+                if audiotype != 1:  # 非默认静音状态
+                    logger.debug(
+                        f"[PROCESS_FRAMES] Custom audio type: {audiotype}")
+
                 if self.custom_index.get(audiotype) is not None:  # 有自定义视频
                     mirindex = self.mirror_index(
                         len(self.custom_img_cycle[audiotype]), self.custom_index[audiotype])
                     target_frame = self.custom_img_cycle[audiotype][mirindex]
                     self.custom_index[audiotype] += 1
+                    logger.debug(
+                        f"[PROCESS_FRAMES] Using custom frame, index: {mirindex}")
                 else:
                     target_frame = self.frame_list_cycle[idx]
+                    logger.debug(
+                        f"[PROCESS_FRAMES] Using default frame, idx: {idx}")
 
                 if enable_transition:
                     # 说话→静音过渡
@@ -396,11 +445,16 @@ class BaseReal:
                     combine_frame = target_frame
             else:
                 self.speaking = True
+                logger.debug(
+                    f"[PROCESS_FRAMES] Speaking state, processing frame {idx}")
+
                 try:
                     current_frame = self.paste_back_frame(res_frame, idx)
                 except Exception as e:
-                    logger.warning(f"paste_back_frame error: {e}")
+                    logger.warning(
+                        f"[PROCESS_FRAMES] paste_back_frame error: {e}")
                     continue
+
                 if enable_transition:
                     # 静音→说话过渡
                     if time.time() - _transition_start < _transition_duration and _last_silent_frame is not None:
@@ -419,36 +473,72 @@ class BaseReal:
             if self.opt.transport == 'virtualcam':
                 if vircam == None:
                     height, width, _ = combine_frame.shape
+                    logger.info(
+                        f"[PROCESS_FRAMES] Initializing virtualcam: {width}x{height}")
                     vircam = pyvirtualcam.Camera(
                         width=width, height=height, fps=25, fmt=pyvirtualcam.PixelFormat.BGR, print_fps=True)
                 vircam.send(combine_frame)
+                logger.debug(f"[PROCESS_FRAMES] Sent frame to virtualcam")
             else:  # webrtc
-                image = combine_frame
-                new_frame = VideoFrame.from_ndarray(image, format="bgr24")
-                asyncio.run_coroutine_threadsafe(
-                    video_track._queue.put((new_frame, None)), loop)
+                try:
+                    image = combine_frame
+                    new_frame = VideoFrame.from_ndarray(image, format="bgr24")
+                    if video_track and video_track._queue:
+                        asyncio.run_coroutine_threadsafe(
+                            video_track._queue.put((new_frame, None)), loop)
+                        logger.debug(
+                            f"[PROCESS_FRAMES] Sent video frame to WebRTC track")
+                    else:
+                        logger.error(
+                            f"[PROCESS_FRAMES] Video track or queue is None!")
+                except Exception as e:
+                    logger.error(
+                        f"[PROCESS_FRAMES] Failed to send video frame: {str(e)}")
+
             self.record_video_data(combine_frame)
 
-            for audio_frame in audio_frames:
+            for i, audio_frame in enumerate(audio_frames):
                 frame, type, eventpoint = audio_frame
                 frame = (frame * 32767).astype(np.int16)
 
                 if self.opt.transport == 'virtualcam':
-                    audio_tmp.put(frame.tobytes())  # TODO
+                    audio_tmp.put(frame.tobytes())
+                    logger.debug(
+                        f"[PROCESS_FRAMES] Sent audio frame {i} to virtualcam")
                 else:  # webrtc
-                    new_frame = AudioFrame(
-                        format='s16', layout='mono', samples=frame.shape[0])
-                    new_frame.planes[0].update(frame.tobytes())
-                    new_frame.sample_rate = 16000
-                    asyncio.run_coroutine_threadsafe(
-                        audio_track._queue.put((new_frame, eventpoint)), loop)
+                    try:
+                        new_frame = AudioFrame(
+                            format='s16', layout='mono', samples=frame.shape[0])
+                        new_frame.planes[0].update(frame.tobytes())
+                        new_frame.sample_rate = 16000
+
+                        if audio_track and audio_track._queue:
+                            asyncio.run_coroutine_threadsafe(
+                                audio_track._queue.put((new_frame, eventpoint)), loop)
+                            logger.debug(
+                                f"[PROCESS_FRAMES] Sent audio frame {i} to WebRTC track, eventpoint: {eventpoint}")
+                        else:
+                            logger.error(
+                                f"[PROCESS_FRAMES] Audio track or queue is None!")
+                    except Exception as e:
+                        logger.error(
+                            f"[PROCESS_FRAMES] Failed to send audio frame {i}: {str(e)}")
+
                 self.record_audio_data(frame)
+
             if self.opt.transport == 'virtualcam':
                 vircam.sleep_until_next_frame()
+
+        logger.info(f"[PROCESS_FRAMES] Quit signal received, cleaning up...")
+
         if self.opt.transport == 'virtualcam':
             audio_thread.join()
-            vircam.close()
-        logger.info('basereal process_frames thread stop')
+            if vircam:
+                vircam.close()
+            logger.info(f"[PROCESS_FRAMES] Virtualcam closed")
+
+        logger.info(
+            f"[PROCESS_FRAMES] process_frames thread stopped for session {self.sessionid}")
 
     # def process_custom(self,audiotype:int,idx:int):
     #     if self.curr_state!=audiotype: #从推理切到口播

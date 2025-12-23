@@ -5,6 +5,7 @@ from openai import OpenAI
 
 from basereal import BaseReal
 from logger import logger
+from system_prompt import SYSTEM_PROMPT
 
 
 # Load environment variables at runtime to ensure they're available
@@ -45,7 +46,7 @@ def llm_response(message, nerfreal: BaseReal):
 
     completion = client.chat.completions.create(
         model=model,
-        messages=[{'role': 'system', 'content': 'You are a helpful assistant.'},
+        messages=[{'role': 'system', 'content': SYSTEM_PROMPT},
                   {'role': 'user', 'content': message}],
         stream=True,
         # 通过以下设置，在流式输出的最后一行展示token使用信息

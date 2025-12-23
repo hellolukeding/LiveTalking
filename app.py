@@ -302,7 +302,7 @@ async def is_speaking(request):
 
 
 async def on_shutdown(app):
-    # close peer connections
+    # 关闭对等连接
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros)
     pcs.clear()
@@ -367,10 +367,10 @@ if __name__ == '__main__':
                         default='', help="custom action json")
 
     # xtts gpt-sovits cosyvoice fishtts tencent doubao indextts2 azuretts
-    parser.add_argument('--tts', type=str, default='edgetts',
+    parser.add_argument('--tts', type=str, default='doubao',
                         help="tts service type")
-    parser.add_argument('--REF_FILE', type=str, default="zh-CN-YunxiaNeural",
-                        help="参考文件名或语音模型ID，默认值为 edgetts的语音模型ID zh-CN-YunxiaNeural, 若--tts指定为azuretts, 可以使用Azure语音模型ID, 如zh-CN-XiaoxiaoMultilingualNeural")
+    parser.add_argument('--REF_FILE', type=str, default="zh_female_xiaohe_uranus_bigtts",
+                        help="参考文件名或语音模型ID，默认值为 doubao的语音模型ID zh_female_xiaohe_uranus_bigtts, 若--tts指定为azuretts, 可以使用Azure语音模型ID, 如zh-CN-XiaoxiaoMultilingualNeural")
     parser.add_argument('--REF_TEXT', type=str, default=None)
     # http://localhost:9000
     parser.add_argument('--TTS_SERVER', type=str,
@@ -422,12 +422,6 @@ if __name__ == '__main__':
         model = load_model(opt)
         avatar = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size, avatar, 160)
-
-    # if opt.transport=='rtmp':
-    #     thread_quit = Event()
-    #     nerfreals[0] = build_nerfreal(0)
-    #     rendthrd = Thread(target=nerfreals[0].render,args=(thread_quit,))
-    #     rendthrd.start()
     if opt.transport == 'virtualcam':
         thread_quit = Event()
         nerfreals[0] = build_nerfreal(0)
@@ -446,7 +440,7 @@ if __name__ == '__main__':
     appasync.router.add_post("/is_speaking", is_speaking)
     appasync.router.add_static('/', path='web')
 
-    # Configure default CORS settings.
+    # 配置默认CORS设置
     cors = aiohttp_cors.setup(appasync, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -454,7 +448,7 @@ if __name__ == '__main__':
             allow_headers="*",
         )
     })
-    # Configure CORS on all routes.
+    # 在所有路由上配置CORS
     for route in list(appasync.router.routes()):
         cors.add(route)
 

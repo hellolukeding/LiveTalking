@@ -37,6 +37,7 @@ from tqdm import tqdm
 from basereal import BaseReal
 from lipasr import LipASR
 from logger import logger
+from tencentasr import TencentApiAsr
 from wav2lip.models.wav2lip_v2 import Wav2Lip
 
 # from imgcache import ImgCache
@@ -215,8 +216,12 @@ class LipReal(BaseReal):
         self.model = model
         self.frame_list_cycle, self.face_list_cycle, self.coord_list_cycle = avatar
 
-        self.asr = LipASR(opt, self)
-        self.asr.warm_up()
+        # 保留LipASR用于口型驱动的特征提取
+        self.lip_asr = LipASR(opt, self)
+        self.lip_asr.warm_up()
+
+        # 新增腾讯ASR用于文本识别
+        self.tencent_asr = TencentApiAsr(opt, self)
 
         self.render_event = mp.Event()
 
@@ -234,6 +239,62 @@ class LipReal(BaseReal):
         combine_frame[y1:y2, x1:x2] = res_frame
         return combine_frame
 
+    async def _run_tencent_asr(self, audio_data: bytes):
+        """
+        运行腾讯ASR进行文本识别
+        Args:
+            audio_data: 音频数据 (bytes)
+        """
+        try:
+            logger.info("[Tencent ASR] Starting recognition...")
+            text = await self.tencent_asr.recognize(audio_data)
+            logger.info(f"[Tencent ASR] Recognized: {text}")
+
+            # 将识别结果发送到数据通道或进行其他处理
+            if text:
+                self.send_custom_msg(f"ASR_RESULT:{text}")
+
+            return text
+        except Exception as e:
+            logger.error(f"[Tencent ASR] Error: {e}")
+            return None
+
+    def _collect_audio_data(self, duration_ms: int = 2000) -> bytes:
+        """
+        收集指定时长的音频数据用于腾讯ASR
+        Args:
+            duration_ms: 收集的音频时长（毫秒）
+        Returns:
+            bytes: 音频数据
+        """
+        import io
+
+        import soundfile as sf
+
+        # 计算需要收集的帧数
+        frames_needed = int(duration_ms / 20)  # 每帧20ms
+        audio_frames = []
+
+        # 从音频队列中收集帧
+        for _ in range(frames_needed):
+            try:
+                frame, type, _ = self.lip_asr.output_queue.get(timeout=0.1)
+                if type == 0:  # 正常语音帧
+                    audio_frames.append(frame)
+            except queue.Empty:
+                break
+
+        if not audio_frames:
+            return b""
+
+        # 合并音频帧
+        audio_data = np.concatenate(audio_frames)
+
+        # 转换为WAV格式
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_data, 16000, format='WAV')
+        return buffer.getvalue()
+
     def render(self, quit_event, loop=None, audio_track=None, video_track=None):
         # if self.opt.asr:
         #     self.asr.warm_up()
@@ -243,7 +304,7 @@ class LipReal(BaseReal):
 
         infer_quit_event = Event()
         infer_thread = Thread(target=inference, args=(infer_quit_event, self.batch_size, self.face_list_cycle,
-                                                      self.asr.feat_queue, self.asr.output_queue, self.res_frame_queue,
+                                                      self.lip_asr.feat_queue, self.lip_asr.output_queue, self.res_frame_queue,
                                                       self.model,))  # mp.Process
         infer_thread.start()
 
@@ -257,11 +318,35 @@ class LipReal(BaseReal):
         totaltime = 0
         _starttime = time.perf_counter()
         # _totalframe=0
+
+        # 腾讯ASR相关变量
+        asr_count = 0
+        asr_interval = 50  # 每50帧运行一次腾讯ASR（约1秒）
+
         while not quit_event.is_set():
             # update texture every frame
             # audio stream thread...
             t = time.perf_counter()
-            self.asr.run_step()
+            # 运行LipASR用于口型驱动的特征提取
+            self.lip_asr.run_step()
+
+            # 定期运行腾讯ASR进行文本识别
+            asr_count += 1
+            if asr_count >= asr_interval:
+                asr_count = 0
+                # 收集音频数据并运行腾讯ASR
+                try:
+                    audio_data = self._collect_audio_data(2000)  # 收集2秒音频
+                    if len(audio_data) > 1000:  # 确保有足够的音频数据
+                        if loop and loop.is_running():
+                            asyncio.create_task(
+                                self._run_tencent_asr(audio_data))
+                        else:
+                            # 如果没有事件循环，同步运行
+                            text = asyncio.run(
+                                self._run_tencent_asr(audio_data))
+                except Exception as e:
+                    logger.warning(f"Failed to run Tencent ASR: {e}")
 
             # if video_track._queue.qsize()>=2*self.opt.batch_size:
             #     print('sleep qsize=',video_track._queue.qsize())

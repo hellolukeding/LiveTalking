@@ -76,7 +76,9 @@ class BaseReal:
         self.chunk = self.sample_rate // opt.fps
         self.sessionid = self.opt.sessionid
 
-        if opt.tts == "edgetts":
+        if opt.tts == "doubao":
+            self.tts = DoubaoTTS(opt, self)
+        elif opt.tts == "edgetts":
             self.tts = EdgeTTS(opt, self)
         elif opt.tts == "gpt-sovits":
             self.tts = SovitsTTS(opt, self)
@@ -88,12 +90,13 @@ class BaseReal:
             self.tts = FishTTS(opt, self)
         elif opt.tts == "tencent":
             self.tts = TencentTTS(opt, self)
-        elif opt.tts == "doubao":
-            self.tts = DoubaoTTS(opt, self)
         elif opt.tts == "indextts2":
             self.tts = IndexTTS2(opt, self)
         elif opt.tts == "azuretts":
             self.tts = AzureTTS(opt, self)
+        else:
+            # 默认使用doubao
+            self.tts = DoubaoTTS(opt, self)
 
         self.speaking = False
 
@@ -129,7 +132,11 @@ class BaseReal:
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
-        self.asr.put_audio_frame(audio_chunk, datainfo)
+        # 兼容不同的ASR实现
+        if hasattr(self, 'asr'):
+            self.asr.put_audio_frame(audio_chunk, datainfo)
+        elif hasattr(self, 'lip_asr'):
+            self.lip_asr.put_audio_frame(audio_chunk, datainfo)
 
     def put_audio_file(self, filebyte, datainfo: dict = {}):
         input_stream = BytesIO(filebyte)
@@ -162,7 +169,11 @@ class BaseReal:
 
     def flush_talk(self):
         self.tts.flush_talk()
-        self.asr.flush_talk()
+        # 兼容不同的ASR实现
+        if hasattr(self, 'asr'):
+            self.asr.flush_talk()
+        elif hasattr(self, 'lip_asr'):
+            self.lip_asr.flush_talk()
 
     def is_speaking(self) -> bool:
         return self.speaking

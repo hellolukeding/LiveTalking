@@ -1,23 +1,50 @@
 import os
 import time
 
+from openai import OpenAI
+
 from basereal import BaseReal
 from logger import logger
 
 
+# Load environment variables at runtime to ensure they're available
+def get_api_config():
+    api_key = os.getenv("OPEN_AI_API_KEY")
+    base_url = os.getenv("OPEN_AI_URL")
+    model = os.getenv("LLM_MODEL", "qwen-plus")
+    return api_key, base_url, model
+
+
 def llm_response(message, nerfreal: BaseReal):
     start = time.perf_counter()
-    from openai import OpenAI
+
+    # Get API configuration at runtime
+    api_key, base_url, model = get_api_config()
+
+    # Check if API key is configured
+    if not api_key:
+        logger.error("OPEN_AI_API_KEY environment variable is not set")
+        nerfreal.put_msg_txt("Error: API key not configured")
+        return
+
+    if not base_url:
+        logger.error("OPEN_AI_URL environment variable is not set")
+        nerfreal.put_msg_txt("Error: Base URL not configured")
+        return
+
     client = OpenAI(
-        # 如果您没有配置环境变量，请在此处用您的API Key进行替换
-        api_key=os.getenv("OPEN_AI_API_KEY"),
-        # 填写DashScope SDK的base_url
-        base_url=os.getenv("OPEN_AI_URL"),
+        api_key=api_key,
+        base_url=base_url,
     )
+
     end = time.perf_counter()
     logger.info(f"llm Time init: {end-start}s")
+    logger.info(f"llm url: {base_url}")
+    logger.info(f"llm model: {model}")
+    logger.info(f"llm key: {api_key}")
+
     completion = client.chat.completions.create(
-        model=os.getenv("LLM_MODEL", "qwen-plus"),
+        model=model,
         messages=[{'role': 'system', 'content': 'You are a helpful assistant.'},
                   {'role': 'user', 'content': message}],
         stream=True,

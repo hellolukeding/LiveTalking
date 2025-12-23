@@ -86,7 +86,7 @@ def load_avatar(avatar_id):
 
 @torch.no_grad()
 def warm_up(batch_size, avatar, modelres):
-    logger.info('warmup model...')
+    logger.debug('warmup model...')
     model, _, _, _ = avatar
     img_batch = torch.ones(batch_size, 6, modelres, modelres).to(device)
     mel_batch = torch.ones(batch_size, 32, 32, 32).to(device)
@@ -95,7 +95,7 @@ def warm_up(batch_size, avatar, modelres):
 
 def read_imgs(img_list):
     frames = []
-    logger.info('reading images...')
+    logger.debug('reading images...')
     for img_path in tqdm(img_list):
         frame = cv2.imread(img_path)
         frames.append(frame)
@@ -124,7 +124,7 @@ def get_audio_features(features, index):
 
 def read_lms(lms_list):
     land_marks = []
-    logger.info('reading lms...')
+    logger.debug('reading lms...')
     for lms_path in tqdm(lms_list):
         file_landmarks = []  # Store landmarks for this file
         with open(lms_path, "r") as f:
@@ -154,7 +154,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
     index = 0
     count = 0
     counttime = 0
-    logger.info('start inference')
+    logger.debug('start inference')
 
     while not quit_event.is_set():
         starttime = time.perf_counter()
@@ -211,7 +211,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
             counttime += (time.perf_counter() - t)
             count += batch_size
             if count >= 100:
-                logger.info(
+                logger.debug(
                     f"------actual avg infer fps:{count / counttime:.4f}")
                 count = 0
                 counttime = 0
@@ -228,7 +228,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
 
         # print('total batch time:', time.perf_counter() - starttime)
 
-    logger.info('lightreal inference processor stop')
+    logger.debug('lightreal inference processor stop')
 
 
 class LightReal(BaseReal):
@@ -276,6 +276,11 @@ class LightReal(BaseReal):
         #     self.asr.warm_up()
 
         self.init_customindex()
+
+        # 🆕 修复：保存音频轨道引用到父类
+        self.audio_track = audio_track
+        self.loop = loop
+
         # 传递音轨与事件循环以支持 TTS 直接转发到 WebRTC
         self.tts.render(quit_event, audio_track, loop)
         try:
@@ -315,7 +320,7 @@ class LightReal(BaseReal):
             # if delay > 0:
             #     time.sleep(delay)
         # self.render_event.clear() #end infer process render
-        logger.info('lightreal thread stop')
+        logger.debug('lightreal thread stop')
 
         infer_quit_event.set()
         infer_thread.join()

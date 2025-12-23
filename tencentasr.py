@@ -397,7 +397,7 @@ class TencentApiAsr(BaseASR):
                         f"Response keys: {list(response_body.keys())}"
                     )
 
-                logger.info(f"[ASR] Tencent ASR recognized: {transcript}")
+                logger.debug(f"[ASR] Tencent ASR recognized: {transcript}")
                 return transcript
 
         except Exception as e:

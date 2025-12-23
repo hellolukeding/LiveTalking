@@ -59,7 +59,7 @@ def _load(checkpoint_path):
 
 def load_model(path):
     model = Wav2Lip()
-    logger.info("Load checkpoint from: {}".format(path))
+    logger.debug("Load checkpoint from: {}".format(path))
     checkpoint = _load(path)
     s = checkpoint["state_dict"]
     new_s = {}
@@ -97,7 +97,7 @@ def load_avatar(avatar_id):
 @torch.no_grad()
 def warm_up(batch_size, model, modelres):
     # 预热函数
-    logger.info('warmup model...')
+    logger.debug('warmup model...')
     img_batch = torch.ones(batch_size, 6, modelres, modelres).to(device)
     mel_batch = torch.ones(batch_size, 1, 80, 16).to(device)
     model(mel_batch, img_batch)
@@ -105,7 +105,7 @@ def warm_up(batch_size, model, modelres):
 
 def read_imgs(img_list):
     frames = []
-    logger.info('reading images...')
+    logger.debug('reading images...')
     for img_path in tqdm(img_list):
         frame = cv2.imread(img_path)
         frames.append(frame)
@@ -134,7 +134,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
     index = 0
     count = 0
     counttime = 0
-    logger.info('start inference')
+    logger.debug('start inference')
     while not quit_event.is_set():
         starttime = time.perf_counter()
         mel_batch = []
@@ -186,7 +186,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
             count += batch_size
             # _totalframe += 1
             if count >= 100:
-                logger.info(
+                logger.debug(
                     f"------actual avg infer fps:{count/counttime:.4f}")
                 count = 0
                 counttime = 0
@@ -196,7 +196,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                     length, index), audio_frames[i*2:i*2+2]))
                 index = index + 1
             # print('total batch time:',time.perf_counter()-starttime)
-    logger.info('lipreal inference processor stop')
+    logger.debug('lipreal inference processor stop')
 
 
 class LipReal(BaseReal):
@@ -250,9 +250,9 @@ class LipReal(BaseReal):
             audio_data: 音频数据 (bytes)
         """
         try:
-            logger.info("[Tencent ASR] Starting recognition...")
+            logger.debug("[Tencent ASR] Starting recognition...")
             text = await self.tencent_asr.recognize(audio_data)
-            logger.info(f"[Tencent ASR] Recognized: {text}")
+            logger.debug(f"[Tencent ASR] Recognized: {text}")
 
             # 将识别结果发送到数据通道或进行其他处理
             if text:
@@ -400,7 +400,7 @@ class LipReal(BaseReal):
             # if delay > 0:
             #     time.sleep(delay)
         # self.render_event.clear() #end infer process render
-        logger.info('lipreal thread stop')
+        logger.debug('lipreal thread stop')
 
         infer_quit_event.set()
         infer_thread.join()

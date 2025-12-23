@@ -71,7 +71,7 @@ class DoubaoTTS(BaseTTS):
             }
         }
 
-        logger.info(f"[DOUBAO_TTS] HTTP POST请求: {self.api_url}")
+        logger.debug(f"[DOUBAO_TTS] HTTP POST请求: {self.api_url}")
         logger.info(
             f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
 
@@ -85,7 +85,7 @@ class DoubaoTTS(BaseTTS):
             )
 
             end = time.perf_counter()
-            logger.info(f"[DOUBAO_TTS] 请求耗时: {end-start:.2f}s")
+            logger.debug(f"[DOUBAO_TTS] 请求耗时: {end-start:.2f}s")
 
             if response.status_code == 200:
                 result = response.json()
@@ -129,7 +129,7 @@ class DoubaoTTS(BaseTTS):
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
-        logger.info(f"[DOUBAO_TTS] Starting text_to_audio for: '{text}'")
+        logger.debug(f"[DOUBAO_TTS] Starting text_to_audio for: '{text}'")
         logger.info(
             f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
 
@@ -148,7 +148,7 @@ class DoubaoTTS(BaseTTS):
             audio_array = np.frombuffer(
                 audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
 
-            logger.info(f"[DOUBAO_TTS] 音频数组形状: {audio_array.shape}")
+            logger.debug(f"[DOUBAO_TTS] 音频数组形状: {audio_array.shape}")
 
             # 重采样（如果需要）
             # 豆包返回的通常是16kHz，与我们的需求一致，所以可能不需要重采样
@@ -156,7 +156,7 @@ class DoubaoTTS(BaseTTS):
             # 流式处理音频
             self.stream_audio(audio_array, msg)
 
-            logger.info(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
+            logger.debug(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
 
         except Exception as e:
             logger.error(f"[DOUBAO_TTS] 音频处理失败: {e}")
@@ -170,7 +170,7 @@ class DoubaoTTS(BaseTTS):
         idx = 0
         first = True
 
-        logger.info(f"[DOUBAO_TTS] 开始流式传输音频，总长度: {streamlen}")
+        logger.debug(f"[DOUBAO_TTS] 开始流式传输音频，总长度: {streamlen}")
 
         while streamlen >= self.chunk and self.state == State.RUNNING:
             eventpoint = {}
@@ -196,7 +196,7 @@ class DoubaoTTS(BaseTTS):
         self.parent.put_audio_frame(
             np.zeros(self.chunk, np.float32), eventpoint)
 
-        logger.info(f"[DOUBAO_TTS] 流式传输完成")
+        logger.debug(f"[DOUBAO_TTS] 流式传输完成")
 
 
 class MockOpt:

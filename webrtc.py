@@ -54,8 +54,10 @@ class PlayerStreamTrack(MediaStreamTrack):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
-        # 增加队列容量以避免 QueueFull 错误
-        self._queue = asyncio.Queue(maxsize=500)
+        # 🆕 修复：调整队列容量，避免过大导致延迟
+        # 音频：200帧 = 4秒缓冲，视频：100帧 = 4秒缓冲
+        queue_size = 200 if kind == "audio" else 100
+        self._queue = asyncio.Queue(maxsize=queue_size)
         self.timelist = []  # 记录最近包的时间戳
         self.current_frame_count = 0
         if self.kind == 'video':
@@ -111,58 +113,78 @@ class PlayerStreamTrack(MediaStreamTrack):
     async def recv(self) -> Union[Frame, Packet]:
         # frame = self.frames[self.counter % 30]
         self._player._start(self)
-        # if self.kind == 'video':
-        #     frame = await self._queue.get()
-        # else: #audio
-        #     if hasattr(self, "_timestamp"):
-        #         wait = self._start + self._timestamp / SAMPLE_RATE + AUDIO_PTIME - time.time()
-        #         if wait>0:
-        #             await asyncio.sleep(wait)
-        #         if self._queue.qsize()<1:
-        #             #frame = AudioFrame(format='s16', layout='mono', samples=320)
-        #             audio = np.zeros((1, 320), dtype=np.int16)
-        #             frame = AudioFrame.from_ndarray(audio, layout='mono', format='s16')
-        #             frame.sample_rate=16000
-        #         else:
-        #             frame = await self._queue.get()
-        #     else:
-        #         frame = await self._queue.get()
-        frame, eventpoint = await self._queue.get()
+
+        # 安全获取帧，避免阻塞
+        try:
+            frame, eventpoint = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            # 如果超时，检查是否需要停止
+            if self.readyState != "live":
+                raise Exception("Track stopped")
+            # 返回静音帧避免卡死
+            if self.kind == 'audio':
+                audio = np.zeros((1, 320), dtype=np.int16)
+                frame = AudioFrame.from_ndarray(
+                    audio, layout='mono', format='s16')
+                frame.sample_rate = 16000
+                eventpoint = {}
+            else:
+                # 视频返回黑色帧
+                frame = VideoFrame.from_ndarray(
+                    np.zeros((480, 640, 3), dtype=np.uint8), format="bgr24")
+                eventpoint = {}
 
         # 如果队列中放入的是 None，停止轨道
         if frame is None:
             self.stop()
             raise Exception
 
-        # 音频：基于实际 samples 和帧的 sample_rate 来计算 pts 和 time_base，
-        # 避免使用固定的 320 增量（这样可以支持可变长度帧或不同采样率）
+        # 音频时间戳处理
         if self.kind == 'audio':
-            sample_rate = getattr(frame, 'sample_rate', SAMPLE_RATE)
-            n_samples = int(
-                getattr(frame, 'samples', AUDIO_PTIME * SAMPLE_RATE))
+            # 确保音频帧有正确的sample_rate和samples属性
+            if not hasattr(frame, 'sample_rate'):
+                frame.sample_rate = SAMPLE_RATE
+            if not hasattr(frame, 'samples'):
+                frame.samples = 320  # 20ms at 16kHz
+
+            sample_rate = frame.sample_rate
+            n_samples = frame.samples
 
             # 初始化时间基准
             if not hasattr(self, "_timestamp"):
                 self._start = time.time()
                 self._timestamp = 0
                 self.current_frame_count = 0
-                self.timelist.append(self._start)
                 mylogger.info('audio start:%f', self._start)
 
-            # 当前帧的 pts（以样本为单位）
+            # 计算当前帧的PTS
             pts = self._timestamp
             frame.pts = pts
             frame.time_base = fractions.Fraction(1, sample_rate)
 
-            # 推进 timestamp 以便下一帧使用（以样本数为单位）
+            # 推进时间戳
             self._timestamp += n_samples
             self.current_frame_count += 1
 
-            # 简单节拍控制，基于实际样本数而不是固定帧数
-            expected_time = self._start + (self._timestamp / sample_rate)
-            wait = expected_time - time.time()
-            if wait > 0:
-                await asyncio.sleep(wait)
+            # 精确时间控制 - 使用固定间隔
+            expected_time = self._start + \
+                (self.current_frame_count * AUDIO_PTIME)
+            wait_time = expected_time - time.time()
+
+            # 简单的等待逻辑
+            if wait_time > 0:
+                # 根据队列大小动态调整
+                queue_size = self._queue.qsize()
+                if queue_size > 40:
+                    wait_time = min(wait_time, 0.005)
+                elif queue_size > 20:
+                    wait_time = min(wait_time, 0.01)
+
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+            elif wait_time < -0.1:
+                mylogger.warning(
+                    f"[WebRTC] Audio behind schedule: {wait_time:.3f}s")
         else:
             pts, time_base = await self.next_timestamp()
             frame.pts = pts
@@ -260,7 +282,7 @@ class HumanPlayer:
                 ),
             )
             self.__thread.start()
-            mylogger.info(f"[HumanPlayer] Worker thread started successfully")
+            mylogger.debug(f"[HumanPlayer] Worker thread started successfully")
         else:
             mylogger.debug(f"[HumanPlayer] Worker thread already running")
 
@@ -270,14 +292,14 @@ class HumanPlayer:
             f"[HumanPlayer] Track stopped: {track.kind}, remaining: {len(self.__started)}")
 
         if not self.__started and self.__thread is not None:
-            mylogger.info(f"[HumanPlayer] Stopping worker thread")
+            mylogger.debug(f"[HumanPlayer] Stopping worker thread")
             self.__thread_quit.set()
             self.__thread.join()
             self.__thread = None
-            mylogger.info(f"[HumanPlayer] Worker thread stopped")
+            mylogger.debug(f"[HumanPlayer] Worker thread stopped")
 
         if not self.__started and self.__container is not None:
-            mylogger.info(f"[HumanPlayer] Clearing container reference")
+            mylogger.debug(f"[HumanPlayer] Clearing container reference")
             # self.__container.close()
             self.__container = None
 

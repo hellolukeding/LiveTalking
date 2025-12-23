@@ -114,7 +114,7 @@ def build_nerfreal(opt, model, avatar):
 
 def load_models(opt):
     """加载模型"""
-    logger.info("正在加载模型...")
+    logger.debug("正在加载模型...")
 
     if opt.model == 'musetalk':
         from musereal import MuseReal, load_avatar, load_model, warm_up
@@ -132,7 +132,7 @@ def load_models(opt):
         avatar = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size, avatar, 160)
 
-    logger.info("模型加载完成")
+    logger.debug("模型加载完成")
     return model, avatar
 
 
@@ -205,7 +205,7 @@ def main():
     async def offer(request):
         try:
             params = await request.json()
-            logger.info(f"[OFFER] Received offer request: {params}")
+            logger.debug(f"[OFFER] Received offer request: {params}")
 
             if not params or 'sdp' not in params or 'type' not in params:
                 return web.Response(

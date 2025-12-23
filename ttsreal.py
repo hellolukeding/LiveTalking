@@ -40,6 +40,7 @@ import requests
 import resampy
 import soundfile as sf
 import websockets
+from av import AudioFrame
 
 if TYPE_CHECKING:
     from basereal import BaseReal
@@ -82,6 +83,11 @@ class BaseTTS:
         # 保存音频轨道引用
         self.audio_track = audio_track
         self.loop = loop
+
+        # 🆕 修复：如果提供了音频轨道，直接发送到WebRTC
+        # 否则通过basereal转发（兼容旧逻辑）
+        self.direct_to_webrtc = (audio_track is not None)
+
         process_thread = Thread(target=self.process_tts, args=(quit_event,))
         process_thread.start()
 
@@ -91,15 +97,15 @@ class BaseTTS:
                 msg: tuple[str, dict] = self.msgqueue.get(
                     block=True, timeout=1)
                 self.state = State.RUNNING
-                logger.info(f"[TTS] Received message: {msg[0]}")
+                logger.debug(f"[TTS] Received message: {msg[0]}")
             except queue.Empty:
                 continue
             try:
                 self.txt_to_audio(msg)
-                logger.info(f"[TTS] Completed processing: {msg[0][:50]}...")
+                logger.debug(f"[TTS] Completed processing: {msg[0][:50]}...")
             except Exception as e:
                 logger.error(f"[TTS] Error processing message: {e}")
-        logger.info('ttsreal thread stop')
+        logger.debug('ttsreal thread stop')
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         pass
@@ -112,7 +118,7 @@ class EdgeTTS(BaseTTS):
         text, textevent = msg
         t = time.time()
         asyncio.new_event_loop().run_until_complete(self.__main(voicename, text))
-        logger.info(f'-------edge tts time:{time.time()-t:.4f}s')
+        logger.debug(f'-------edge tts time:{time.time()-t:.4f}s')
         if self.input_stream.getbuffer().nbytes <= 0:  # edgetts err
             logger.error('edgetts err!!!!!')
             return
@@ -142,16 +148,16 @@ class EdgeTTS(BaseTTS):
     def __create_bytes_stream(self, byte_stream):
         # byte_stream=BytesIO(buffer)
         stream, sample_rate = sf.read(byte_stream)  # [T*sample_rate,] float64
-        logger.info(f'[INFO]tts audio stream {sample_rate}: {stream.shape}')
+        logger.debug(f'[INFO]tts audio stream {sample_rate}: {stream.shape}')
         stream = stream.astype(np.float32)
 
         if stream.ndim > 1:
-            logger.info(
+            logger.debug(
                 f'[WARN] audio has {stream.shape[1]} channels, only use the first.')
             stream = stream[:, 0]
 
         if sample_rate != self.sample_rate and stream.shape[0] > 0:
-            logger.info(
+            logger.debug(
                 f'[WARN] audio sample rate is {sample_rate}, resampling into {self.sample_rate}.')
             stream = resampy.resample(
                 x=stream, sr_orig=sample_rate, sr_new=self.sample_rate)
@@ -212,7 +218,7 @@ class FishTTS(BaseTTS):
                 },
             )
             end = time.perf_counter()
-            logger.info(f"fish_speech Time to make POST: {end-start}s")
+            logger.debug(f"fish_speech Time to make POST: {end-start}s")
 
             if res.status_code != 200:
                 logger.error("Error:%s", res.text)
@@ -224,7 +230,7 @@ class FishTTS(BaseTTS):
                 # print('chunk len:',len(chunk))
                 if first:
                     end = time.perf_counter()
-                    logger.info(
+                    logger.debug(
                         f"fish_speech Time to first chunk: {end-start}s")
                     first = False
                 if chunk and self.state == State.RUNNING:
@@ -304,7 +310,7 @@ class SovitsTTS(BaseTTS):
                 stream=True,
             )
             end = time.perf_counter()
-            logger.info(f"gpt_sovits Time to make POST: {end-start}s")
+            logger.debug(f"gpt_sovits Time to make POST: {end-start}s")
 
             if res.status_code != 200:
                 logger.error("Error:%s", res.text)
@@ -314,10 +320,10 @@ class SovitsTTS(BaseTTS):
 
             # 12800 1280 32K*20ms*2
             for chunk in res.iter_content(chunk_size=None):
-                logger.info('chunk len:%d', len(chunk))
+                logger.debug('chunk len:%d', len(chunk))
                 if first:
                     end = time.perf_counter()
-                    logger.info(
+                    logger.debug(
                         f"gpt_sovits Time to first chunk: {end-start}s")
                     first = False
                 if chunk and self.state == State.RUNNING:
@@ -329,16 +335,16 @@ class SovitsTTS(BaseTTS):
     def __create_bytes_stream(self, byte_stream):
         # byte_stream=BytesIO(buffer)
         stream, sample_rate = sf.read(byte_stream)  # [T*sample_rate,] float64
-        logger.info(f'[INFO]tts audio stream {sample_rate}: {stream.shape}')
+        logger.debug(f'[INFO]tts audio stream {sample_rate}: {stream.shape}')
         stream = stream.astype(np.float32)
 
         if stream.ndim > 1:
-            logger.info(
+            logger.debug(
                 f'[WARN] audio has {stream.shape[1]} channels, only use the first.')
             stream = stream[:, 0]
 
         if sample_rate != self.sample_rate and stream.shape[0] > 0:
-            logger.info(
+            logger.debug(
                 f'[WARN] audio sample rate is {sample_rate}, resampling into {self.sample_rate}.')
             stream = resampy.resample(
                 x=stream, sr_orig=sample_rate, sr_new=self.sample_rate)
@@ -401,7 +407,7 @@ class CosyVoiceTTS(BaseTTS):
                 "GET", f"{server_url}/inference_zero_shot", data=payload, files=files, stream=True)
 
             end = time.perf_counter()
-            logger.info(f"cosy_voice Time to make POST: {end-start}s")
+            logger.debug(f"cosy_voice Time to make POST: {end-start}s")
 
             if res.status_code != 200:
                 logger.error("Error:%s", res.text)
@@ -412,7 +418,7 @@ class CosyVoiceTTS(BaseTTS):
             for chunk in res.iter_content(chunk_size=9600):  # 960 24K*20ms*2
                 if first:
                     end = time.perf_counter()
-                    logger.info(
+                    logger.debug(
                         f"cosy_voice Time to first chunk: {end-start}s")
                     first = False
                 if chunk and self.state == State.RUNNING:
@@ -527,7 +533,7 @@ class TencentTTS(BaseTTS):
                                 data=json.dumps(params), stream=True)
 
             end = time.perf_counter()
-            logger.info(f"tencent Time to make POST: {end-start}s")
+            logger.debug(f"tencent Time to make POST: {end-start}s")
 
             first = True
 
@@ -543,7 +549,7 @@ class TencentTTS(BaseTTS):
                         return
                     except:
                         end = time.perf_counter()
-                        logger.info(
+                        logger.debug(
                             f"tencent Time to first chunk: {end-start}s")
                         first = False
                 if chunk and self.state == State.RUNNING:
@@ -625,8 +631,8 @@ class DoubaoTTS(BaseTTS):
             }
         }
 
-        logger.info(f"[DOUBAO_TTS] HTTP POST请求: {self.api_url}")
-        logger.info(
+        logger.debug(f"[DOUBAO_TTS] HTTP POST请求: {self.api_url}")
+        logger.debug(
             f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
 
         try:
@@ -639,7 +645,7 @@ class DoubaoTTS(BaseTTS):
             )
 
             end = time.perf_counter()
-            logger.info(f"[DOUBAO_TTS] 请求耗时: {end-start:.2f}s")
+            logger.debug(f"[DOUBAO_TTS] 请求耗时: {end-start:.2f}s")
 
             if response.status_code == 200:
                 result = response.json()
@@ -665,7 +671,7 @@ class DoubaoTTS(BaseTTS):
                 # 解码base64
                 try:
                     audio_bytes = base64.b64decode(audio_base64)
-                    logger.info(
+                    logger.debug(
                         f"[DOUBAO_TTS] 收到音频数据: {len(audio_bytes)} bytes")
                     return audio_bytes
                 except Exception as e:
@@ -683,8 +689,8 @@ class DoubaoTTS(BaseTTS):
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
-        logger.info(f"[DOUBAO_TTS] Starting text_to_audio for: '{text}'")
-        logger.info(
+        logger.debug(f"[DOUBAO_TTS] Starting text_to_audio for: '{text}'")
+        logger.debug(
             f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
 
         # 调用HTTP接口获取音频
@@ -702,7 +708,7 @@ class DoubaoTTS(BaseTTS):
             audio_array = np.frombuffer(
                 audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
 
-            logger.info(f"[DOUBAO_TTS] 音频数组形状: {audio_array.shape}")
+            logger.debug(f"[DOUBAO_TTS] 音频数组形状: {audio_array.shape}")
 
             # 重采样（如果需要）
             # 豆包返回的通常是16kHz，与我们的需求一致，所以可能不需要重采样
@@ -710,7 +716,7 @@ class DoubaoTTS(BaseTTS):
             # 流式处理音频
             self.stream_audio(audio_array, msg)
 
-            logger.info(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
+            logger.debug(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
 
         except Exception as e:
             logger.error(f"[DOUBAO_TTS] 音频处理失败: {e}")
@@ -718,39 +724,107 @@ class DoubaoTTS(BaseTTS):
                 np.zeros(self.chunk, np.float32), {'status': 'error', 'text': text, 'error': str(e)})
 
     def stream_audio(self, audio_array, msg: tuple[str, dict]):
-        """将完整的音频数组流式发送给父类"""
+        """修复的流式音频处理 - 支持直接发送到WebRTC"""
         text, textevent = msg
         streamlen = audio_array.shape[0]
         idx = 0
         first = True
 
-        logger.info(f"[DOUBAO_TTS] 开始流式传输音频，总长度: {streamlen}")
+        logger.debug(
+            f"[DOUBAO_TTS] Starting stream, total length: {streamlen}, direct_to_webrtc: {getattr(self, 'direct_to_webrtc', False)}")
 
-        while streamlen >= self.chunk and self.state == State.RUNNING:
-            eventpoint = {}
+        # 🆕 关键修复：使用缓冲区处理不完整的音频块
+        buffer = np.array([], dtype=np.float32)
+        frames_sent = 0
 
-            if first:
-                eventpoint = {'status': 'start', 'text': text}
-                eventpoint.update(**textevent)
-                first = False
+        while idx < streamlen and self.state == State.RUNNING:
+            # 添加到缓冲区
+            buffer = np.concatenate([buffer, audio_array[idx:idx+self.chunk]])
 
-            # 发送音频块
-            self.parent.put_audio_frame(
-                audio_array[idx:idx + self.chunk], eventpoint)
+            # 从缓冲区取出完整的320样本块
+            while len(buffer) >= self.chunk:
+                audio_chunk = buffer[:self.chunk]
+                buffer = buffer[self.chunk:]
 
-            streamlen -= self.chunk
+                eventpoint = {}
+                if first:
+                    eventpoint = {'status': 'start', 'text': text}
+                    eventpoint.update(**textevent)
+                    first = False
+
+                # 🆕 根据标志决定发送路径
+                if getattr(self, 'direct_to_webrtc', False):
+                    # 直接发送到WebRTC
+                    self._send_to_webrtc(audio_chunk, eventpoint)
+                else:
+                    # 通过basereal转发（兼容旧逻辑）
+                    self.parent.put_audio_frame(audio_chunk, eventpoint)
+
+                frames_sent += 1
+
             idx += self.chunk
 
-            # 小延迟，避免处理过快
-            time.sleep(0.001)
+        # 处理缓冲区剩余数据
+        if len(buffer) > 0 and self.state == State.RUNNING:
+            # 填充静音到完整块（只在最后）
+            padded_chunk = np.zeros(self.chunk, dtype=np.float32)
+            padded_chunk[:len(buffer)] = buffer
 
-        # 发送结束事件
-        eventpoint = {'status': 'end', 'text': text}
-        eventpoint.update(**textevent)
-        self.parent.put_audio_frame(
-            np.zeros(self.chunk, np.float32), eventpoint)
+            eventpoint = {'status': 'end', 'text': text}
+            eventpoint.update(**textevent)
 
-        logger.info(f"[DOUBAO_TTS] 流式传输完成")
+            # 🆕 根据标志决定发送路径
+            if getattr(self, 'direct_to_webrtc', False):
+                self._send_to_webrtc(padded_chunk, eventpoint)
+            else:
+                self.parent.put_audio_frame(padded_chunk, eventpoint)
+
+            frames_sent += 1
+        else:
+            # 发送结束事件
+            eventpoint = {'status': 'end', 'text': text}
+            eventpoint.update(**textevent)
+
+            # 🆕 根据标志决定发送路径
+            if getattr(self, 'direct_to_webrtc', False):
+                self._send_to_webrtc(
+                    np.zeros(self.chunk, np.float32), eventpoint)
+            else:
+                self.parent.put_audio_frame(
+                    np.zeros(self.chunk, np.float32), eventpoint)
+
+        logger.debug(
+            f"[DOUBAO_TTS] Stream completed, {frames_sent} frames sent")
+
+    def _send_to_webrtc(self, audio_chunk, eventpoint):
+        """直接发送到WebRTC音频轨道"""
+        try:
+            # 转换为16-bit PCM
+            frame = (audio_chunk * 32767).astype(np.int16)
+            frame_2d = frame.reshape(1, -1)
+
+            # 创建AudioFrame
+            audio_frame = AudioFrame.from_ndarray(
+                frame_2d, layout='mono', format='s16')
+            audio_frame.sample_rate = 16000
+
+            # 发送到WebRTC队列
+            if self.audio_track and self.loop:
+                try:
+                    self.loop.call_soon_threadsafe(
+                        self.audio_track._queue.put_nowait, (audio_frame, eventpoint))
+                    logger.debug(f"[DOUBAO_TTS] Directly sent to WebRTC")
+                except asyncio.QueueFull:
+                    logger.warning(
+                        f"[DOUBAO_TTS] WebRTC queue full, dropping frame")
+                except Exception as e:
+                    logger.error(f"[DOUBAO_TTS] Failed to send to WebRTC: {e}")
+            else:
+                logger.warning(
+                    f"[DOUBAO_TTS] Audio track or loop not available")
+        except Exception as e:
+            logger.error(
+                f"[DOUBAO_TTS] Failed to create/send audio frame: {e}")
 
 ###########################################################################################
 
@@ -768,7 +842,7 @@ class IndexTTS2(BaseTTS):
             from gradio_client import Client, handle_file
             self.client = Client(self.server_url)
             self.handle_file = handle_file
-            logger.info(f"IndexTTS2 Gradio客户端初始化成功: {self.server_url}")
+            logger.debug(f"IndexTTS2 Gradio客户端初始化成功: {self.server_url}")
         except ImportError:
             logger.error(
                 "IndexTTS2 需要安装 gradio_client: pip install gradio_client")
@@ -786,14 +860,14 @@ class IndexTTS2(BaseTTS):
                 logger.error("IndexTTS2 文本分割失败")
                 return
 
-            logger.info(f"IndexTTS2 文本分割为 {len(segments)} 个片段")
+            logger.debug(f"IndexTTS2 文本分割为 {len(segments)} 个片段")
 
             # 循环生成每个片段的音频
             for i, segment_text in enumerate(segments):
                 if self.state != State.RUNNING:
                     break
 
-                logger.info(f"IndexTTS2 正在生成第 {i+1}/{len(segments)} 段音频...")
+                logger.debug(f"IndexTTS2 正在生成第 {i+1}/{len(segments)} 段音频...")
                 audio_file = self.indextts2_generate(segment_text)
 
                 if audio_file:
@@ -810,7 +884,7 @@ class IndexTTS2(BaseTTS):
     def split_text(self, text):
         """使用 IndexTTS2 API 分割文本"""
         try:
-            logger.info(f"IndexTTS2 开始分割文本，长度: {len(text)}")
+            logger.debug(f"IndexTTS2 开始分割文本，长度: {len(text)}")
 
             # 调用文本分割 API
             result = self.client.predict(
@@ -822,14 +896,14 @@ class IndexTTS2(BaseTTS):
             # 解析分割结果
             if 'value' in result and 'data' in result['value']:
                 data = result['value']['data']
-                logger.info(f"IndexTTS2 共分割为 {len(data)} 个片段")
+                logger.debug(f"IndexTTS2 共分割为 {len(data)} 个片段")
 
                 segments = []
                 for i, item in enumerate(data):
                     序号 = item[0] + 1
                     分句内容 = item[1]
                     token数 = item[2]
-                    logger.info(f"片段 {序号}: {len(分句内容)} 字符, {token数} tokens")
+                    logger.debug(f"片段 {序号}: {len(分句内容)} 字符, {token数} tokens")
                     segments.append(分句内容)
 
                 return segments
@@ -876,7 +950,7 @@ class IndexTTS2(BaseTTS):
             )
 
             end = time.perf_counter()
-            logger.info(f"IndexTTS2 片段生成完成，耗时: {end-start:.2f}s")
+            logger.debug(f"IndexTTS2 片段生成完成，耗时: {end-start:.2f}s")
 
             # 返回生成的音频文件路径
             if 'value' in result:
@@ -897,19 +971,19 @@ class IndexTTS2(BaseTTS):
         try:
             # 读取音频文件
             stream, sample_rate = sf.read(audio_file)
-            logger.info(f'IndexTTS2 音频文件 {sample_rate}Hz: {stream.shape}')
+            logger.debug(f'IndexTTS2 音频文件 {sample_rate}Hz: {stream.shape}')
 
             # 转换为float32
             stream = stream.astype(np.float32)
 
             # 如果是多声道，只取第一个声道
             if stream.ndim > 1:
-                logger.info(f'IndexTTS2 音频有 {stream.shape[1]} 个声道，只使用第一个')
+                logger.debug(f'IndexTTS2 音频有 {stream.shape[1]} 个声道，只使用第一个')
                 stream = stream[:, 0]
 
             # 重采样到目标采样率
             if sample_rate != self.sample_rate and stream.shape[0] > 0:
-                logger.info(
+                logger.debug(
                     f'IndexTTS2 重采样: {sample_rate}Hz -> {self.sample_rate}Hz')
                 stream = resampy.resample(
                     x=stream, sr_orig=sample_rate, sr_new=self.sample_rate)
@@ -944,7 +1018,7 @@ class IndexTTS2(BaseTTS):
             try:
                 if os.path.exists(audio_file):
                     os.remove(audio_file)
-                    logger.info(f"IndexTTS2 已删除临时文件: {audio_file}")
+                    logger.debug(f"IndexTTS2 已删除临时文件: {audio_file}")
             except Exception as e:
                 logger.warning(f"IndexTTS2 删除临时文件失败: {e}")
 
@@ -990,7 +1064,7 @@ class XTTS(BaseTTS):
                 stream=True,
             )
             end = time.perf_counter()
-            logger.info(f"xtts Time to make POST: {end-start}s")
+            logger.debug(f"xtts Time to make POST: {end-start}s")
 
             if res.status_code != 200:
                 print("Error:", res.text)
@@ -1001,7 +1075,7 @@ class XTTS(BaseTTS):
             for chunk in res.iter_content(chunk_size=9600):  # 24K*20ms*2
                 if first:
                     end = time.perf_counter()
-                    logger.info(f"xtts Time to first chunk: {end-start}s")
+                    logger.debug(f"xtts Time to first chunk: {end-start}s")
                     first = False
                 if chunk:
                     yield chunk
@@ -1071,21 +1145,21 @@ class AzureTTS(BaseTTS):
         fin_latency = int(result.properties.get_property(
             speechsdk.PropertyId.SpeechServiceResponse_SynthesisFinishLatencyMs
         ))
-        logger.info(
+        logger.debug(
             f"azure音频生成相关：首字节延迟: {fb_latency} ms, 完成延迟: {fin_latency} ms, result_id: {result.result_id}")
 
     # === 回调 ===
 
     def _on_synthesizing(self, evt: speechsdk.SpeechSynthesisEventArgs):
         if evt.result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            logger.info("SynthesizingAudioCompleted")
+            logger.debug("SynthesizingAudioCompleted")
         elif evt.result.reason == speechsdk.ResultReason.Canceled:
             cancellation_details = evt.result.cancellation_details
-            logger.info(
+            logger.debug(
                 f"Speech synthesis canceled: {cancellation_details.reason}")
             if cancellation_details.reason == speechsdk.CancellationReason.Error:
                 if cancellation_details.error_details:
-                    logger.info(
+                    logger.debug(
                         f"Error details: {cancellation_details.error_details}")
         if self.state != State.RUNNING:
             self.audio_buffer = b''

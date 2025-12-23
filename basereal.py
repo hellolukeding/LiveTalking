@@ -43,7 +43,7 @@ from ttsreal import (XTTS, AzureTTS, CosyVoiceTTS, DoubaoTTS, EdgeTTS, FishTTS,
 
 def read_imgs(img_list):
     frames = []
-    logger.info('reading images...')
+    logger.debug('reading images...')
     for img_path in tqdm(img_list):
         frame = cv2.imread(img_path)
         frames.append(frame)
@@ -131,103 +131,107 @@ class BaseReal:
                 else:
                     self.datachannel.send(msg)
         else:
-            logger.info(f"No datachannel to send msg: {msg}")
+            logger.debug(f"No datachannel to send msg: {msg}")
 
     def put_msg_txt(self, msg, datainfo: dict = {}):
         self.tts.put_msg_txt(msg, datainfo)
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
+        # 简化的音频处理 - 只做格式转换和转发
         logger.debug(
             f"[BASE_REAL] put_audio_frame called: chunk_shape={audio_chunk.shape}, datainfo={datainfo}")
 
         # 转发给ASR（用于口型驱动）
         if hasattr(self, 'asr'):
-            self.asr.put_audio_frame(audio_chunk, datainfo)
-            logger.debug(f"[BASE_REAL] Sent frame to asr")
+            try:
+                self.asr.put_audio_frame(audio_chunk, datainfo)
+            except Exception as e:
+                logger.warning(f"[BASE_REAL] ASR forwarding failed: {e}")
         elif hasattr(self, 'lip_asr'):
-            self.lip_asr.put_audio_frame(audio_chunk, datainfo)
-            logger.debug(
-                f"[BASE_REAL] Sent frame to lip_asr, queue_size={self.lip_asr.queue.qsize()}")
+            try:
+                self.lip_asr.put_audio_frame(audio_chunk, datainfo)
+            except Exception as e:
+                logger.warning(f"[BASE_REAL] LipASR forwarding failed: {e}")
 
-        # 🆕 新增：直接转发给WebRTC音频轨道（用于前端播放）
+        # 简化的音频格式转换和WebRTC转发
         try:
-            # 确保音频数据是正确的格式
+            # 确保音频数据格式正确
+            if not isinstance(audio_chunk, np.ndarray):
+                logger.error(
+                    f"[BASE_REAL] Invalid audio chunk type: {type(audio_chunk)}")
+                return
+
+            # 🆕 修复：直接处理音频块，不再分块
+            # TTS应该已经生成了正确的320样本块
+            chunk_size = 320  # 20ms at 16kHz
+
+            # 转换为正确的格式
             frame = (audio_chunk * 32767).astype(np.int16)
 
-            # 创建音频帧 - 处理单声道和多声道输入：
-            # PyAV 对数组维度有严格要求，通常期望 (channels, samples) 的形状或一维单声道
+            # 检查音频块大小
+            if len(frame) != chunk_size:
+                logger.warning(
+                    f"[BASE_REAL] Audio chunk size mismatch: {len(frame)} (expected {chunk_size})")
+
+                # 如果音频块太小，丢弃（避免噪音）
+                if len(frame) < chunk_size:
+                    logger.warning(
+                        f"[BASE_REAL] Dropping short audio chunk: {len(frame)} samples")
+                    return
+
+                # 如果音频块太大，截取前320个样本
+                frame = frame[:chunk_size]
+                logger.warning(
+                    f"[BASE_REAL] Truncating audio chunk to {chunk_size} samples")
+
+            # 创建音频帧
             if frame.ndim == 1:
                 frame_2d = frame.reshape(1, -1)
-                layout = 'mono'
-            elif frame.ndim == 2:
-                # 常见输入为 (samples, channels)，对于 s16 等 packed 格式，
-                # PyAV 更容易接受形状 (1, samples*channels)，即 interleaved 按行展开
-                frame_2d = frame.reshape(1, -1)
-                channels = frame.shape[1]
-                layout = 'stereo' if channels == 2 else 'mono'
             else:
-                # 回退：强制为单声道
                 frame_2d = frame.reshape(1, -1)
-                layout = 'mono'
 
             new_frame = AudioFrame.from_ndarray(
-                frame_2d, layout=layout, format='s16')
+                frame_2d, layout='mono', format='s16')
             new_frame.sample_rate = 16000
+            # samples属性会自动计算，不需要手动设置
 
-            # 如果 audio_track 未设置，则直接缓冲
+            # 如果 audio_track 未设置，则缓冲
             if not (hasattr(self, 'audio_track') and self.audio_track):
                 with self._pending_audio_lock:
                     self._pending_audio.append((new_frame, datainfo))
+                logger.debug("[BASE_REAL] Audio track not ready, buffered")
+                return
+
+            # 简单的队列检查
+            queue_size = self.audio_track._queue.qsize()
+            if queue_size > 60:  # 队列过大，丢弃
                 logger.warning(
-                    "[BASE_REAL] Audio track not yet available - buffered frame for later flush")
-            else:
-                # 尝试通过音轨队列的 loop 安全地放入帧，添加重试机制
-                queued = False
-                queue_loop = getattr(self.audio_track._queue, '_loop', None)
-                if queue_loop and queue_loop.is_running():
-                    max_retries = 3
-                    retry_delay = 0.01  # 10ms
+                    f"[BASE_REAL] Queue too large ({queue_size}), dropping frame")
+                return
 
-                    for attempt in range(max_retries):
-                        try:
-                            queue_loop.call_soon_threadsafe(
-                                self.audio_track._queue.put_nowait, (new_frame, datainfo))
-                            queued = True
-                            logger.debug(
-                                f"[BASE_REAL] Forwarded audio to WebRTC track: {datainfo}")
-                            break  # 成功，退出重试循环
-                        except asyncio.QueueFull:
-                            if attempt < max_retries - 1:
-                                logger.warning(
-                                    f"[BASE_REAL] Queue full, retrying {attempt + 1}/{max_retries}...")
-                                time.sleep(retry_delay)
-                            else:
-                                logger.error(
-                                    f"[BASE_REAL] Queue still full after {max_retries} attempts, dropping frame")
-                                # 清空队列中的旧帧，为新帧腾出空间
-                                try:
-                                    while self.audio_track._queue.qsize() > 100:
-                                        self.audio_track._queue.get_nowait()
-                                    logger.info(
-                                        "[BASE_REAL] Cleared old frames from queue")
-                                except:
-                                    pass
-                                queued = True  # 标记为已处理，避免重复缓冲
-                        except Exception as e:
-                            logger.error(
-                                f"[BASE_REAL] Unexpected error putting frame: {e}")
-                            break
+            # 直接放入队列
+            queue_loop = getattr(self.audio_track._queue, '_loop', None)
+            if queue_loop and queue_loop.is_running():
+                try:
+                    queue_loop.call_soon_threadsafe(
+                        self.audio_track._queue.put_nowait, (new_frame, datainfo))
+                    logger.debug(f"[BASE_REAL] Audio frame sent successfully")
+                    return
+                except asyncio.QueueFull:
+                    logger.warning(f"[BASE_REAL] Queue full, dropping frame")
+                    return
+                except Exception as e:
+                    logger.error(f"[BASE_REAL] Unexpected error: {e}")
+                    return
 
-                # 如果无法通过队列 loop 放入（例如 loop 还没准备好），则回退到缓冲区
-                if not queued:
-                    with self._pending_audio_lock:
-                        self._pending_audio.append((new_frame, datainfo))
-                    logger.warning(
-                        "[BASE_REAL] Audio track loop not ready - buffered frame for later flush")
+            # 回退到缓冲区
+            with self._pending_audio_lock:
+                self._pending_audio.append((new_frame, datainfo))
+            logger.debug("[BASE_REAL] Loop not ready, buffered")
+
         except Exception as e:
-            logger.error(
-                f"[BASE_REAL] Failed to forward audio to WebRTC: {e}")
+            logger.error(f"[BASE_REAL] Failed to process audio frame: {e}")
             import traceback
             logger.error(traceback.format_exc())
 
@@ -278,16 +282,16 @@ class BaseReal:
     def __create_bytes_stream(self, byte_stream):
         # byte_stream=BytesIO(buffer)
         stream, sample_rate = sf.read(byte_stream)  # [T*sample_rate,] float64
-        logger.info(f'[INFO]put audio stream {sample_rate}: {stream.shape}')
+        logger.debug(f'[INFO]put audio stream {sample_rate}: {stream.shape}')
         stream = stream.astype(np.float32)
 
         if stream.ndim > 1:
-            logger.info(
+            logger.debug(
                 f'[WARN] audio has {stream.shape[1]} channels, only use the first.')
             stream = stream[:, 0]
 
         if sample_rate != self.sample_rate and stream.shape[0] > 0:
-            logger.info(
+            logger.debug(
                 f'[WARN] audio sample rate is {sample_rate}, resampling into {self.sample_rate}.')
             stream = resampy.resample(
                 x=stream, sr_orig=sample_rate, sr_new=self.sample_rate)
@@ -307,7 +311,7 @@ class BaseReal:
 
     def __loadcustom(self):
         for item in self.opt.customopt:
-            logger.info(item)
+            logger.debug(item)
             input_img_list = glob.glob(os.path.join(
                 item['imgpath'], '*.[jpJP][pnPN]*[gG]'))
             input_img_list = sorted(input_img_list, key=lambda x: int(
@@ -328,7 +332,7 @@ class BaseReal:
             self.custom_index[key] = 0
 
     def notify(self, eventpoint):
-        logger.info("notify:%s", eventpoint)
+        logger.debug("notify:%s", eventpoint)
 
     def start_recording(self):
         """开始录制视频"""
@@ -462,9 +466,9 @@ class BaseReal:
             self.custom_index[audiotype] = 0
 
     def process_frames(self, quit_event, loop=None, audio_track=None, video_track=None):
-        logger.info(
+        logger.debug(
             f"[PROCESS_FRAMES] Starting process_frames for session {self.sessionid}")
-        logger.info(
+        logger.debug(
             f"[PROCESS_FRAMES] Transport: {self.opt.transport}, Loop: {loop is not None}")
 
         enable_transition = False  # 设置为False禁用过渡效果，True启用
@@ -477,7 +481,7 @@ class BaseReal:
             _last_speaking_frame = None  # 说话帧缓存
 
         if self.opt.transport == 'virtualcam':
-            logger.info(f"[PROCESS_FRAMES] Using virtualcam transport")
+            logger.debug(f"[PROCESS_FRAMES] Using virtualcam transport")
             import pyvirtualcam
             vircam = None
 
@@ -486,7 +490,7 @@ class BaseReal:
                 quit_event, audio_tmp,), daemon=True, name="pyaudio_stream")
             audio_thread.start()
         else:
-            logger.info(f"[PROCESS_FRAMES] Using WebRTC transport")
+            logger.debug(f"[PROCESS_FRAMES] Using WebRTC transport")
             if audio_track is None:
                 logger.error("[PROCESS_FRAMES] Audio track is None!")
             if video_track is None:
@@ -505,9 +509,9 @@ class BaseReal:
 
                 # Log frame processing status every 2 seconds
                 if time.time() - last_log_time > 2:
-                    logger.info(
+                    logger.debug(
                         f"[PROCESS_FRAMES] Processing frames: count={frame_count}, session={self.sessionid}")
-                    logger.info(
+                    logger.debug(
                         f"[PROCESS_FRAMES] Audio queue size: {self.res_frame_queue.qsize()}")
                     last_log_time = time.time()
                     frame_count = 0
@@ -517,7 +521,7 @@ class BaseReal:
                     f"[PROCESS_FRAMES] Queue empty, waiting for frames...")
                 continue
             except Exception as e:
-                logger.error(
+                logger.debug(
                     f"[PROCESS_FRAMES] Error getting frame from queue: {str(e)}")
                 continue
 
@@ -532,7 +536,7 @@ class BaseReal:
                 current_speaking = not (
                     audio_frames[0][1] != 0 and audio_frames[1][1] != 0)
                 if current_speaking != _last_speaking:
-                    logger.info(
+                    logger.debug(
                         f"[PROCESS_FRAMES] 状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                     _transition_start = time.time()
                 _last_speaking = current_speaking
@@ -578,7 +582,7 @@ class BaseReal:
                 try:
                     current_frame = self.paste_back_frame(res_frame, idx)
                 except Exception as e:
-                    logger.warning(
+                    logger.debug(
                         f"[PROCESS_FRAMES] paste_back_frame error: {e}")
                     continue
 
@@ -600,7 +604,7 @@ class BaseReal:
             if self.opt.transport == 'virtualcam':
                 if vircam == None:
                     height, width, _ = combine_frame.shape
-                    logger.info(
+                    logger.debug(
                         f"[PROCESS_FRAMES] Initializing virtualcam: {width}x{height}")
                     vircam = pyvirtualcam.Camera(
                         width=width, height=height, fps=25, fmt=pyvirtualcam.PixelFormat.BGR, print_fps=True)
@@ -616,56 +620,30 @@ class BaseReal:
                         logger.debug(
                             f"[PROCESS_FRAMES] Sent video frame to WebRTC track")
                     else:
-                        logger.error(
+                        logger.debug(
                             f"[PROCESS_FRAMES] Video track or queue is None!")
                 except Exception as e:
-                    logger.error(
+                    logger.debug(
                         f"[PROCESS_FRAMES] Failed to send video frame: {str(e)}")
 
             self.record_video_data(combine_frame)
 
-            for i, audio_frame in enumerate(audio_frames):
-                frame, type, eventpoint = audio_frame
-                frame = (frame * 32767).astype(np.int16)
-
-                if self.opt.transport == 'virtualcam':
-                    audio_tmp.put(frame.tobytes())
-                    logger.debug(
-                        f"[PROCESS_FRAMES] Sent audio frame {i} to virtualcam")
-                else:  # webrtc
-                    try:
-                        # 创建音频帧 - 需要2维数组
-                        frame_2d = frame.reshape(1, -1)
-                        new_frame = AudioFrame.from_ndarray(
-                            frame_2d, layout='mono', format='s16')
-                        new_frame.sample_rate = 16000
-
-                        if audio_track and audio_track._queue:
-                            asyncio.run_coroutine_threadsafe(
-                                audio_track._queue.put((new_frame, eventpoint)), loop)
-                            logger.debug(
-                                f"[PROCESS_FRAMES] Sent audio frame {i} to WebRTC track, eventpoint: {eventpoint}")
-                        else:
-                            logger.error(
-                                f"[PROCESS_FRAMES] Audio track or queue is None!")
-                    except Exception as e:
-                        logger.error(
-                            f"[PROCESS_FRAMES] Failed to send audio frame {i}: {str(e)}")
-
-                self.record_audio_data(frame)
+            # 🆕 修复：移除process_frames中的音频处理逻辑
+            # 音频处理已经在put_audio_frame中完成，这里不需要重复处理
+            # 这避免了音频被处理两次导致的速度过快问题
 
             if self.opt.transport == 'virtualcam':
                 vircam.sleep_until_next_frame()
 
-        logger.info(f"[PROCESS_FRAMES] Quit signal received, cleaning up...")
+        logger.debug(f"[PROCESS_FRAMES] Quit signal received, cleaning up...")
 
         if self.opt.transport == 'virtualcam':
             audio_thread.join()
             if vircam:
                 vircam.close()
-            logger.info(f"[PROCESS_FRAMES] Virtualcam closed")
+            logger.debug(f"[PROCESS_FRAMES] Virtualcam closed")
 
-        logger.info(
+        logger.debug(
             f"[PROCESS_FRAMES] process_frames thread stopped for session {self.sessionid}")
 
     # def process_custom(self,audiotype:int,idx:int):

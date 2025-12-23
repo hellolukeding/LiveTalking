@@ -101,7 +101,7 @@ def load_avatar(avatar_id):
 @torch.no_grad()
 def warm_up(batch_size, model):
     # 预热函数
-    logger.info('warmup model...')
+    logger.debug('warmup model...')
     vae, unet, pe, timesteps, audio_processor = model
     # batch_size = 16
     # timesteps = torch.tensor([0], device=unet.device)
@@ -121,7 +121,7 @@ def warm_up(batch_size, model):
 
 def read_imgs(img_list):
     frames = []
-    logger.info('reading images...')
+    logger.debug('reading images...')
     for img_path in tqdm(img_list):
         frame = cv2.imread(img_path)
         frames.append(frame)
@@ -153,7 +153,7 @@ def inference(quit_event, batch_size, input_latent_list_cycle, audio_feat_queue,
     index = 0
     count = 0
     counttime = 0
-    logger.info('start inference')
+    logger.debug('start inference')
     while not quit_event.is_set():
         starttime = time.perf_counter()
         try:
@@ -209,7 +209,7 @@ def inference(quit_event, batch_size, input_latent_list_cycle, audio_feat_queue,
             count += batch_size
             # _totalframe += 1
             if count >= 100:
-                logger.info(
+                logger.debug(
                     f"------actual avg infer fps:{count/counttime:.4f}")
                 count = 0
                 counttime = 0
@@ -219,7 +219,7 @@ def inference(quit_event, batch_size, input_latent_list_cycle, audio_feat_queue,
                     length, index), audio_frames[i*2:i*2+2]))
                 index = index + 1
             # print('total batch time:',time.perf_counter()-starttime)
-    logger.info('musereal inference processor stop')
+    logger.debug('musereal inference processor stop')
 
 
 class MuseReal(BaseReal):
@@ -267,7 +267,7 @@ class MuseReal(BaseReal):
             latent = self.input_latent_list_cycle[idx]
             latent_batch.append(latent)
         latent_batch = torch.cat(latent_batch, dim=0)
-        logger.info('infer=======')
+        logger.debug('infer=======')
         # for i, (whisper_batch,latent_batch) in enumerate(gen):
         audio_feature_batch = torch.from_numpy(whisper_batch)
         audio_feature_batch = audio_feature_batch.to(device=self.unet.device,
@@ -298,6 +298,11 @@ class MuseReal(BaseReal):
         #     self.asr.warm_up()
 
         self.init_customindex()
+
+        # 🆕 修复：保存音频轨道引用到父类
+        self.audio_track = audio_track
+        self.loop = loop
+
         # 传递音轨与事件循环以支持 TTS 直接转发到 WebRTC
         self.tts.render(quit_event, audio_track, loop)
         try:

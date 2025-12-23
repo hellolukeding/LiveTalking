@@ -261,7 +261,7 @@ class TencentApiAsrSimple:
                 if not transcript:
                     raise RuntimeError("No transcript found in response")
 
-                logger.info(f"[ASR] Tencent ASR recognized: {transcript}")
+                logger.debug(f"[ASR] Tencent ASR recognized: {transcript}")
                 return transcript
 
         except Exception as e:

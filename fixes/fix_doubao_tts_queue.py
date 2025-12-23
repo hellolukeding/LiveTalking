@@ -52,7 +52,7 @@ def put_audio_frame_fixed(self, audio_chunk, datainfo: dict = {}):
     if not (hasattr(self, 'audio_track') and self.audio_track):
         with self._pending_audio_lock:
             self._pending_audio.append((new_frame, datainfo))
-        logger.warning(
+        logger.debug(
             "[BASE_REAL] Audio track not yet available - buffered frame for later flush")
         return
 
@@ -71,24 +71,24 @@ def put_audio_frame_fixed(self, audio_chunk, datainfo: dict = {}):
                 return  # 成功，退出函数
             except asyncio.QueueFull:
                 if attempt < max_retries - 1:
-                    logger.warning(
+                    logger.debug(
                         f"[BASE_REAL] Queue full, retrying {attempt + 1}/{max_retries}...")
                     time.sleep(retry_delay)
                 else:
-                    logger.error(
+                    logger.debug(
                         f"[BASE_REAL] Queue still full after {max_retries} attempts, dropping frame")
                     # 可选择：清空队列或丢弃旧帧
                     # self._drain_queue_if_needed()
                     return
             except Exception as e:
-                logger.error(
+                logger.debug(
                     f"[BASE_REAL] Unexpected error putting frame: {e}")
                 return
 
     # 如果无法通过队列 loop 放入，则回退到缓冲区
     with self._pending_audio_lock:
         self._pending_audio.append((new_frame, datainfo))
-    logger.warning(
+    logger.debug(
         "[BASE_REAL] Audio track loop not ready - buffered frame for later flush")
 
 
@@ -156,7 +156,7 @@ async def stream_tts_with_flow_control(self, audio_stream, msg: tuple[str, dict]
     # 流控器
     flow_controller = AudioFlowController()
 
-    logger.info(f"[DOUBAO_TTS stream_tts] Starting for text: '{text}'")
+    logger.debug(f"[DOUBAO_TTS stream_tts] Starting for text: '{text}'")
     chunk_count = 0
 
     async for chunk in audio_stream:
@@ -171,7 +171,7 @@ async def stream_tts_with_flow_control(self, audio_stream, msg: tuple[str, dict]
                 if flow_controller.should_throttle(queue_size):
                     throttle_delay = flow_controller.get_throttle_delay(
                         queue_size)
-                    logger.warning(
+                    logger.debug(
                         f"[DOUBAO_TTS] Queue size {queue_size} too high, throttling for {throttle_delay}s")
                     await asyncio.sleep(throttle_delay)
 
@@ -194,7 +194,7 @@ async def stream_tts_with_flow_control(self, audio_stream, msg: tuple[str, dict]
                     if flow_controller.should_throttle(queue_size):
                         throttle_delay = flow_controller.get_throttle_delay(
                             queue_size)
-                        logger.warning(
+                        logger.debug(
                             f"[DOUBAO_TTS] Queue size {queue_size} during processing, throttling for {throttle_delay}s")
                         await asyncio.sleep(throttle_delay)
 

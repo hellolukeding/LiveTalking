@@ -96,7 +96,7 @@ def build_nerfreal(sessionid: int) -> BaseReal:
 async def offer(request):
     try:
         params = await request.json()
-        logger.info(f"[OFFER] Received offer request: {params}")
+        logger.debug(f"[OFFER] Received offer request: {params}")
 
         if not params or 'sdp' not in params or 'type' not in params:
             logger.error("[OFFER] Invalid request parameters")
@@ -108,7 +108,7 @@ async def offer(request):
             )
 
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-        logger.info(
+        logger.debug(
             f"[OFFER] Created RTCSessionDescription: type={params['type']}")
 
         # Check session limit
@@ -122,12 +122,12 @@ async def offer(request):
             )
 
         sessionid = randN(6)
-        logger.info(f"[OFFER] Generating session ID: {sessionid}")
+        logger.debug(f"[OFFER] Generating session ID: {sessionid}")
 
         # Initialize session with error handling
         try:
             nerfreals[sessionid] = None
-            logger.info(f"[OFFER] Building nerfreal for session {sessionid}")
+            logger.debug(f"[OFFER] Building nerfreal for session {sessionid}")
 
             # Build nerfreal in executor to avoid blocking
             nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
@@ -136,7 +136,7 @@ async def offer(request):
                 raise RuntimeError("Failed to build nerfreal instance")
 
             nerfreals[sessionid] = nerfreal
-            logger.info(
+            logger.debug(
                 f"[OFFER] Nerfreal built successfully for session {sessionid}")
 
         except Exception as e:
@@ -156,7 +156,7 @@ async def offer(request):
             pc = RTCPeerConnection(
                 configuration=RTCConfiguration(iceServers=[ice_server]))
             pcs.add(pc)
-            logger.info(
+            logger.debug(
                 f"[OFFER] WebRTC peer connection created for session {sessionid}")
 
         except Exception as e:
@@ -172,12 +172,12 @@ async def offer(request):
 
         @pc.on("datachannel")
         def on_datachannel(channel):
-            logger.info(
+            logger.debug(
                 f"[WEBRTC] Data channel created: {channel.label} for session {sessionid}")
             try:
                 nerfreals[sessionid].datachannel = channel
                 nerfreals[sessionid].loop = asyncio.get_event_loop()
-                logger.info(
+                logger.debug(
                     f"[WEBRTC] Data channel initialized for session {sessionid}")
             except Exception as e:
                 logger.error(
@@ -185,16 +185,16 @@ async def offer(request):
 
         @pc.on("track")
         def on_track(track):
-            logger.info(
+            logger.debug(
                 f"[WEBRTC] Track received: {track.kind} for session {sessionid}")
             if track.kind == "audio":
-                logger.info(
+                logger.debug(
                     f"[WEBRTC] Audio track received for session {sessionid}")
                 # 将接收到的音频传递给ASR系统
 
                 @track.on("ended")
                 def on_ended():
-                    logger.info(
+                    logger.debug(
                         f"[WEBRTC] Audio track ended for session {sessionid}")
 
                 # 处理接收到的音频帧
@@ -235,7 +235,7 @@ async def offer(request):
 
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
-            logger.info(
+            logger.debug(
                 f"[WEBRTC] Connection state changed: {pc.connectionState} for session {sessionid}")
             if pc.connectionState == "failed":
                 logger.error(
@@ -245,19 +245,19 @@ async def offer(request):
                     pcs.discard(pc)
                     if sessionid in nerfreals:
                         del nerfreals[sessionid]
-                    logger.info(
+                    logger.debug(
                         f"[WEBRTC] Cleaned up failed session {sessionid}")
                 except Exception as e:
                     logger.error(
                         f"[WEBRTC] Error cleaning up failed session: {str(e)}")
             elif pc.connectionState == "closed":
-                logger.info(
+                logger.debug(
                     f"[WEBRTC] Connection closed for session {sessionid}")
                 try:
                     pcs.discard(pc)
                     if sessionid in nerfreals:
                         del nerfreals[sessionid]
-                    logger.info(
+                    logger.debug(
                         f"[WEBRTC] Cleaned up closed session {sessionid}")
                 except Exception as e:
                     logger.error(
@@ -265,12 +265,12 @@ async def offer(request):
 
         # Create tracks
         try:
-            logger.info(
+            logger.debug(
                 f"[OFFER] Creating media tracks for session {sessionid}")
             player = HumanPlayer(nerfreals[sessionid])
             audio_sender = pc.addTrack(player.audio)
             video_sender = pc.addTrack(player.video)
-            logger.info(
+            logger.debug(
                 f"[OFFER] Media tracks created successfully for session {sessionid}")
 
         except Exception as e:
@@ -300,7 +300,7 @@ async def offer(request):
                                 "rtx", capabilities.codecs))
             transceiver = pc.getTransceivers()[1]
             transceiver.setCodecPreferences(preferences)
-            logger.info(
+            logger.debug(
                 f"[OFFER] Codec preferences configured for session {sessionid}")
         except Exception as e:
             logger.warning(
@@ -308,10 +308,10 @@ async def offer(request):
 
         # Set remote description
         try:
-            logger.info(
+            logger.debug(
                 f"[OFFER] Setting remote description for session {sessionid}")
             await pc.setRemoteDescription(offer)
-            logger.info(
+            logger.debug(
                 f"[OFFER] Remote description set successfully for session {sessionid}")
         except Exception as e:
             logger.error(f"[OFFER] Failed to set remote description: {str(e)}")
@@ -331,12 +331,12 @@ async def offer(request):
 
         # Create and set local description
         try:
-            logger.info(f"[OFFER] Creating answer for session {sessionid}")
+            logger.debug(f"[OFFER] Creating answer for session {sessionid}")
             answer = await pc.createAnswer()
-            logger.info(
+            logger.debug(
                 f"[OFFER] Setting local description for session {sessionid}")
             await pc.setLocalDescription(answer)
-            logger.info(
+            logger.debug(
                 f"[OFFER] Local description set successfully for session {sessionid}")
 
         except Exception as e:
@@ -355,7 +355,7 @@ async def offer(request):
                 status=500
             )
 
-        logger.info(f"[OFFER] Session {sessionid} established successfully")
+        logger.debug(f"[OFFER] Session {sessionid} established successfully")
         return web.Response(
             content_type="application/json",
             text=json.dumps({
@@ -379,7 +379,7 @@ async def offer(request):
 async def human(request):
     try:
         params = await request.json()
-        logger.info(f"[HUMAN] Received human request: {params}")
+        logger.debug(f"[HUMAN] Received human request: {params}")
 
         # Validate request parameters
         if not params:
@@ -414,7 +414,7 @@ async def human(request):
 
         # Handle interrupt
         if params.get('interrupt'):
-            logger.info(f"[HUMAN] Interrupting talk for session {sessionid}")
+            logger.debug(f"[HUMAN] Interrupting talk for session {sessionid}")
             try:
                 nerfreal.flush_talk()
             except Exception as e:
@@ -432,13 +432,13 @@ async def human(request):
                 status=400
             )
 
-        logger.info(
+        logger.debug(
             f"[HUMAN] Processing {msg_type} message for session {sessionid}: {text}")
 
         if msg_type == 'echo':
             try:
                 nerfreal.put_msg_txt(text)
-                logger.info(
+                logger.debug(
                     f"[HUMAN] Echo message queued successfully for session {sessionid}")
             except Exception as e:
                 logger.error(f"[HUMAN] Failed to queue echo message: {str(e)}")
@@ -464,12 +464,12 @@ async def human(request):
                     )
 
                 # Run LLM response in executor
-                logger.info(
+                logger.debug(
                     f"[HUMAN] Starting LLM response for session {sessionid}")
                 asyncio.get_event_loop().run_in_executor(
                     None, llm_response, text, nerfreal)
 
-                logger.info(
+                logger.debug(
                     f"[HUMAN] LLM response queued successfully for session {sessionid}")
 
             except Exception as e:
@@ -490,7 +490,7 @@ async def human(request):
                 status=400
             )
 
-        logger.info(
+        logger.debug(
             f"[HUMAN] Request processed successfully for session {sessionid}")
         return web.Response(
             content_type="application/json",

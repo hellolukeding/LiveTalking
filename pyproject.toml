@@ -53,6 +53,8 @@ gradio_client = "*"
 azure-cognitiveservices-speech = "*"
 mcp = "*"
 python-dotenv = "^1.2.1"
+httpx = "^0.28.1"
+pydub = "^0.25.1"
 
 [build-system]
 requires = ["poetry-core"]

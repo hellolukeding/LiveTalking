@@ -23,6 +23,7 @@ import json
 import random
 import re
 import shutil
+import sys
 from threading import Event, Thread
 from typing import Dict
 
@@ -657,6 +658,23 @@ async def run(push_url, sessionid):
 # os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 # os.environ['MULTIPROCESSING_METHOD'] = 'forkserver'
 if __name__ == '__main__':
+    # 在启动前进行服务健康检查
+    try:
+        from service_health_check import ServiceHealthChecker
+        checker = ServiceHealthChecker()
+        health_check_passed = checker.check_all()
+
+        if not health_check_passed:
+            logger.error("=" * 60)
+            logger.error("❌ 健康检查失败，服务不可用")
+            logger.error("请检查配置文件和网络连接后再启动")
+            logger.error("=" * 60)
+            sys.exit(1)
+    except ImportError:
+        logger.warning("⚠️  无法导入健康检查模块，跳过健康检查")
+    except Exception as e:
+        logger.warning(f"⚠️  健康检查失败: {e}，继续启动...")
+
     mp.set_start_method('spawn')
     parser = argparse.ArgumentParser()
 
@@ -681,11 +699,11 @@ if __name__ == '__main__':
     parser.add_argument('--customvideo_config', type=str,
                         default='', help="custom action json")
 
-    # xtts gpt-sovits cosyvoice fishtts tencent doubao indextts2 azuretts
+    # xtts gpt-sovits cosyvoice fishtts tencent doubao indextts2 azuretts edgetts
     parser.add_argument('--tts', type=str, default='doubao',
                         help="tts service type")
     parser.add_argument('--REF_FILE', type=str, default="zh_female_xiaohe_uranus_bigtts",
-                        help="参考文件名或语音模型ID，默认值为 doubao的语音模型ID zh_female_xiaohe_uranus_bigtts, 若--tts指定为azuretts, 可以使用Azure语音模型ID, 如zh-CN-XiaoxiaoMultilingualNeural")
+                        help="参考文件名或语音模型ID，对于豆包TTS使用voice_id，如zh_female_xiaohe_uranus_bigtts")
     parser.add_argument('--REF_TEXT', type=str, default=None)
     # http://localhost:9000
     parser.add_argument('--TTS_SERVER', type=str,
@@ -706,6 +724,10 @@ if __name__ == '__main__':
                         default=1)  # multi session count
     parser.add_argument('--listenport', type=int,
                         default=8010, help="web listen port")
+
+    # ASR配置 (通过环境变量读取)
+    parser.add_argument('--asr', type=str, default=None,
+                        help="ASR service type (from env ASR_TYPE)")
 
     opt = parser.parse_args()
     # app.config.from_object(opt)

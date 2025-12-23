@@ -55,7 +55,15 @@ mcp = "*"
 python-dotenv = "^1.2.1"
 httpx = "^0.28.1"
 pydub = "^0.25.1"
+requests = "^2.32.3"  # 用于豆包TTS HTTP调用
+aiohttp = "^3.11.10"  # 异步HTTP客户端
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.11.0"
+isort = "^5.12.0"
+flake8 = "^6.1.0"

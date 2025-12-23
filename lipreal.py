@@ -326,11 +326,22 @@ class LipReal(BaseReal):
                 self.asr_audio_buffer = self.asr_audio_buffer[-max_buffer_size:]
 
     def render(self, quit_event, loop=None, audio_track=None, video_track=None):
+        # 保存音频轨道引用到父类
+        self.audio_track = audio_track
+        self.loop = loop
+
         # if self.opt.asr:
         #     self.asr.warm_up()
 
         self.init_customindex()
-        self.tts.render(quit_event)
+        # 传递音频轨道给TTS
+        self.tts.render(quit_event, audio_track, loop)
+
+        # Flush any pending audio frames that were buffered before the audio track or its loop was ready
+        try:
+            self._flush_pending_audio()
+        except Exception:
+            logger.debug('Failed to flush pending audio frames on render')
 
         infer_quit_event = Event()
         infer_thread = Thread(target=inference, args=(infer_quit_event, self.batch_size, self.face_list_cycle,

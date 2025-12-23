@@ -15,8 +15,6 @@
 #  limitations under the License.
 ###############################################################################
 
-from logger import logger as mylogger
-from aiortc import MediaStreamTrack
 import asyncio
 import fractions
 import json
@@ -26,9 +24,12 @@ import time
 from typing import Dict, Optional, Set, Tuple, Union
 
 import numpy as np
+from aiortc import MediaStreamTrack
 from av import AudioFrame
 from av.frame import Frame
 from av.packet import Packet
+
+from logger import logger as mylogger
 
 AUDIO_PTIME = 0.020  # 20ms audio packetization
 VIDEO_CLOCK_RATE = 90000
@@ -53,7 +54,8 @@ class PlayerStreamTrack(MediaStreamTrack):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
-        self._queue = asyncio.Queue(maxsize=100)
+        # 增加队列容量以避免 QueueFull 错误
+        self._queue = asyncio.Queue(maxsize=500)
         self.timelist = []  # 记录最近包的时间戳
         self.current_frame_count = 0
         if self.kind == 'video':
@@ -126,14 +128,49 @@ class PlayerStreamTrack(MediaStreamTrack):
         #     else:
         #         frame = await self._queue.get()
         frame, eventpoint = await self._queue.get()
-        pts, time_base = await self.next_timestamp()
-        frame.pts = pts
-        frame.time_base = time_base
-        if eventpoint and self._player is not None:
-            self._player.notify(eventpoint)
+
+        # 如果队列中放入的是 None，停止轨道
         if frame is None:
             self.stop()
             raise Exception
+
+        # 音频：基于实际 samples 和帧的 sample_rate 来计算 pts 和 time_base，
+        # 避免使用固定的 320 增量（这样可以支持可变长度帧或不同采样率）
+        if self.kind == 'audio':
+            sample_rate = getattr(frame, 'sample_rate', SAMPLE_RATE)
+            n_samples = int(
+                getattr(frame, 'samples', AUDIO_PTIME * SAMPLE_RATE))
+
+            # 初始化时间基准
+            if not hasattr(self, "_timestamp"):
+                self._start = time.time()
+                self._timestamp = 0
+                self.current_frame_count = 0
+                self.timelist.append(self._start)
+                mylogger.info('audio start:%f', self._start)
+
+            # 当前帧的 pts（以样本为单位）
+            pts = self._timestamp
+            frame.pts = pts
+            frame.time_base = fractions.Fraction(1, sample_rate)
+
+            # 推进 timestamp 以便下一帧使用（以样本数为单位）
+            self._timestamp += n_samples
+            self.current_frame_count += 1
+
+            # 简单节拍控制，基于实际样本数而不是固定帧数
+            expected_time = self._start + (self._timestamp / sample_rate)
+            wait = expected_time - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        else:
+            pts, time_base = await self.next_timestamp()
+            frame.pts = pts
+            frame.time_base = time_base
+
+        if eventpoint and self._player is not None:
+            self._player.notify(eventpoint)
+
         if self.kind == 'video':
             self.totaltime += (time.perf_counter() - self.lasttime)
             self.framecount += 1

@@ -66,6 +66,10 @@ class BaseTTS:
         self.msgqueue = Queue()
         self.state = State.RUNNING
 
+        # 🆕 新增：音频轨道支持
+        self.audio_track = None
+        self.loop = None
+
     def flush_talk(self):
         self.msgqueue.queue.clear()
         self.state = State.PAUSE
@@ -74,7 +78,10 @@ class BaseTTS:
         if len(msg) > 0:
             self.msgqueue.put((msg, datainfo))
 
-    def render(self, quit_event):
+    def render(self, quit_event, audio_track=None, loop=None):
+        # 保存音频轨道引用
+        self.audio_track = audio_track
+        self.loop = loop
         process_thread = Thread(target=self.process_tts, args=(quit_event,))
         process_thread.start()
 
@@ -84,9 +91,14 @@ class BaseTTS:
                 msg: tuple[str, dict] = self.msgqueue.get(
                     block=True, timeout=1)
                 self.state = State.RUNNING
+                logger.info(f"[TTS] Received message: {msg[0]}")
             except queue.Empty:
                 continue
-            self.txt_to_audio(msg)
+            try:
+                self.txt_to_audio(msg)
+                logger.info(f"[TTS] Completed processing: {msg[0][:50]}...")
+            except Exception as e:
+                logger.error(f"[TTS] Error processing message: {e}")
         logger.info('ttsreal thread stop')
 
     def txt_to_audio(self, msg: tuple[str, dict]):
@@ -580,106 +592,94 @@ class DoubaoTTS(BaseTTS):
         self.token = os.getenv("DOUBAO_TOKEN")
         # 从环境变量读取voice_id，如果不存在则使用opt.REF_FILE作为fallback
         self.voice_id = os.getenv("DOUBAO_VOICE_ID") or opt.REF_FILE
-        _cluster = 'volcano_tts'
         _host = "openspeech.bytedance.com"
-        self.api_url = f"wss://{_host}/api/v1/tts/ws_binary"
+        self.api_url = f"https://{_host}/api/v1/tts"
 
-        self.request_json = {
+    def doubao_voice(self, text):
+        """使用HTTP POST方式调用豆包TTS"""
+        start = time.perf_counter()
+
+        # 构建请求 - 使用正确的格式
+        request_json = {
             "app": {
                 "appid": self.appid,
-                "token": "access_token",
-                "cluster": _cluster
+                "token": self.token,
+                "cluster": "volcano_tts"
             },
             "user": {
-                "uid": "xxx"
+                "uid": str(uuid.uuid4())
             },
             "audio": {
-                "voice_type": "xxx",
-                "encoding": "pcm",
+                "voice_type": self.voice_id,
+                "encoding": "wav",
                 "rate": 16000,
                 "speed_ratio": 1.0,
                 "volume_ratio": 1.0,
                 "pitch_ratio": 1.0,
             },
             "request": {
-                "reqid": "xxx",
-                "text": "字节跳动语音合成。",
+                "reqid": str(uuid.uuid4()),
+                "text": text,
                 "text_type": "plain",
-                "operation": "xxx"
+                "operation": "query"
             }
         }
 
-    async def doubao_voice(self, text):  # -> Iterator[bytes]:
-        start = time.perf_counter()
-        # 使用从.env读取的voice_id
-        voice_type = self.voice_id
-        logger.info(f"[DOUBAO_TTS] Connecting to WebSocket: {self.api_url}")
+        logger.info(f"[DOUBAO_TTS] HTTP POST请求: {self.api_url}")
         logger.info(
-            f"[DOUBAO_TTS] AppID: {self.appid}, VoiceType: {voice_type}")
-        logger.info(f"[DOUBAO_TTS] Token: {self.token[:10]}...")  # 只显示前10个字符
+            f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
 
         try:
-            # 创建请求对象
-            default_header = bytearray(b'\x11\x10\x11\x00')
-            submit_request_json = copy.deepcopy(self.request_json)
-            submit_request_json["user"]["uid"] = self.parent.sessionid
-            submit_request_json["audio"]["voice_type"] = voice_type
-            submit_request_json["request"]["text"] = text
-            submit_request_json["request"]["reqid"] = str(uuid.uuid4())
-            submit_request_json["request"]["operation"] = "submit"
-            payload_bytes = str.encode(json.dumps(submit_request_json))
-            # if no compression, comment this line
-            payload_bytes = gzip.compress(payload_bytes)
-            full_client_request = bytearray(default_header)
-            full_client_request.extend((len(payload_bytes)).to_bytes(
-                4, 'big'))  # payload size(4 bytes)
-            full_client_request.extend(payload_bytes)  # payload
+            # 发送HTTP POST请求
+            response = requests.post(
+                self.api_url,
+                json=request_json,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
 
-            # 修复Authorization格式：应该是 "Bearer {token}" 而不是 "Bearer; {token}"
-            header = {"Authorization": f"Bearer {self.token}"}
-            logger.info(
-                f"[DOUBAO_TTS] Connecting with Authorization: Bearer {self.token[:10]}...")
-            first = True
-            async with websockets.connect(self.api_url, extra_headers=header, ping_interval=None, close_timeout=10) as ws:
-                logger.info(f"[DOUBAO_TTS] WebSocket connection established")
-                await ws.send(full_client_request)
-                while True:
-                    res = await ws.recv()
-                    header_size = res[0] & 0x0f
-                    message_type = res[1] >> 4
-                    message_type_specific_flags = res[1] & 0x0f
-                    payload = res[header_size*4:]
+            end = time.perf_counter()
+            logger.info(f"[DOUBAO_TTS] 请求耗时: {end-start:.2f}s")
 
-                    if message_type == 0xb:  # audio-only server response
-                        if message_type_specific_flags == 0:  # no sequence number as ACK
-                            # print("                Payload size: 0")
-                            continue
-                        else:
-                            if first:
-                                end = time.perf_counter()
-                                logger.info(
-                                    f"doubao tts Time to first chunk: {end-start}s")
-                                first = False
-                            sequence_number = int.from_bytes(
-                                payload[:4], "big", signed=True)
-                            payload_size = int.from_bytes(
-                                payload[4:8], "big", signed=False)
-                            payload = payload[8:]
-                            yield payload
-                        if sequence_number < 0:
-                            break
-                    else:
-                        break
+            if response.status_code == 200:
+                result = response.json()
+
+                # 检查响应状态
+                if result.get("code", 0) != 3000:
+                    logger.error(
+                        f"[DOUBAO_TTS] API错误: code={result.get('code')}, message={result.get('message', 'Unknown error')}")
+                    return None
+
+                # 获取base64音频数据 - 支持两种格式
+                audio_base64 = None
+                if "data" in result:
+                    if isinstance(result["data"], dict):
+                        audio_base64 = result["data"].get("audio")
+                    elif isinstance(result["data"], str):
+                        audio_base64 = result["data"]
+
+                if not audio_base64:
+                    logger.error(f"[DOUBAO_TTS] 响应中没有音频数据: {result}")
+                    return None
+
+                # 解码base64
+                try:
+                    audio_bytes = base64.b64decode(audio_base64)
+                    logger.info(
+                        f"[DOUBAO_TTS] 收到音频数据: {len(audio_bytes)} bytes")
+                    return audio_bytes
+                except Exception as e:
+                    logger.error(f"[DOUBAO_TTS] Base64解码失败: {e}")
+                    return None
+
+            else:
+                logger.error(
+                    f"[DOUBAO_TTS] HTTP错误 {response.status_code}: {response.text}")
+                return None
+
         except Exception as e:
-            logger.exception('doubao')
-        # # 检查响应状态码
-        # if response.status_code == 200:
-        #     # 处理响应数据
-        #     audio_data = base64.b64decode(response.json().get('data'))
-        #     yield audio_data
-        # else:
-        #     logger.error(f"请求失败，状态码: {response.status_code}")
-        #     return
+            logger.error(f"[DOUBAO_TTS] 请求异常: {e}")
+            return None
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
@@ -687,55 +687,70 @@ class DoubaoTTS(BaseTTS):
         logger.info(
             f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
 
-        try:
-            asyncio.new_event_loop().run_until_complete(
-                self.stream_tts(
-                    self.doubao_voice(text),
-                    msg
-                )
-            )
-            logger.info(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
-        except Exception as e:
-            logger.error(
-                f"[DOUBAO_TTS] Failed to process text_to_audio: {str(e)}")
+        # 调用HTTP接口获取音频
+        audio_bytes = self.doubao_voice(text)
+
+        if audio_bytes is None:
+            logger.error("[DOUBAO_TTS] 音频生成失败")
             # 发送静音帧避免阻塞
+            self.parent.put_audio_frame(
+                np.zeros(self.chunk, np.float32), {'status': 'error', 'text': text, 'error': 'TTS请求失败'})
+            return
+
+        try:
+            # 将音频字节转换为numpy数组
+            audio_array = np.frombuffer(
+                audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+
+            logger.info(f"[DOUBAO_TTS] 音频数组形状: {audio_array.shape}")
+
+            # 重采样（如果需要）
+            # 豆包返回的通常是16kHz，与我们的需求一致，所以可能不需要重采样
+
+            # 流式处理音频
+            self.stream_audio(audio_array, msg)
+
+            logger.info(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
+
+        except Exception as e:
+            logger.error(f"[DOUBAO_TTS] 音频处理失败: {e}")
             self.parent.put_audio_frame(
                 np.zeros(self.chunk, np.float32), {'status': 'error', 'text': text, 'error': str(e)})
 
-    async def stream_tts(self, audio_stream, msg: tuple[str, dict]):
+    def stream_audio(self, audio_array, msg: tuple[str, dict]):
+        """将完整的音频数组流式发送给父类"""
         text, textevent = msg
+        streamlen = audio_array.shape[0]
+        idx = 0
         first = True
-        last_stream = np.array([], dtype=np.float32)
-        logger.info(f"[DOUBAO_TTS stream_tts] Starting for text: '{text}'")
-        chunk_count = 0
-        async for chunk in audio_stream:
-            if chunk is not None and len(chunk) > 0:
-                chunk_count += 1
-                logger.debug(
-                    f"[DOUBAO_TTS stream_tts] Processing chunk {chunk_count}, size: {len(chunk)}")
-                stream = np.frombuffer(
-                    chunk, dtype=np.int16).astype(np.float32) / 32767
-                stream = np.concatenate((last_stream, stream))
-                # stream = resampy.resample(x=stream, sr_orig=24000, sr_new=self.sample_rate)
-                # byte_stream=BytesIO(buffer)
-                # stream = self.__create_bytes_stream(byte_stream)
-                streamlen = stream.shape[0]
-                idx = 0
-                while streamlen >= self.chunk:
-                    eventpoint = {}
-                    if first:
-                        eventpoint = {'status': 'start', 'text': text}
-                        eventpoint.update(**textevent)
-                        first = False
-                    self.parent.put_audio_frame(
-                        stream[idx:idx + self.chunk], eventpoint)
-                    streamlen -= self.chunk
-                    idx += self.chunk
-                last_stream = stream[idx:]  # get the remain stream
+
+        logger.info(f"[DOUBAO_TTS] 开始流式传输音频，总长度: {streamlen}")
+
+        while streamlen >= self.chunk and self.state == State.RUNNING:
+            eventpoint = {}
+
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+
+            # 发送音频块
+            self.parent.put_audio_frame(
+                audio_array[idx:idx + self.chunk], eventpoint)
+
+            streamlen -= self.chunk
+            idx += self.chunk
+
+            # 小延迟，避免处理过快
+            time.sleep(0.001)
+
+        # 发送结束事件
         eventpoint = {'status': 'end', 'text': text}
         eventpoint.update(**textevent)
         self.parent.put_audio_frame(
             np.zeros(self.chunk, np.float32), eventpoint)
+
+        logger.info(f"[DOUBAO_TTS] 流式传输完成")
 
 ###########################################################################################
 

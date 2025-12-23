@@ -115,6 +115,12 @@ class BaseReal:
         self.datachannel = None
         self.loop = None
 
+        # Pending audio frames queued when audio_track or its event loop is not ready
+        # Use a thread-safe list to buffer frames and flush later when possible
+        import threading
+        self._pending_audio = []  # list of (AudioFrame, datainfo)
+        self._pending_audio_lock = threading.Lock()
+
     def send_custom_msg(self, msg):
         if self.datachannel:
             logger.info(
@@ -132,11 +138,132 @@ class BaseReal:
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
-        # 兼容不同的ASR实现
+        logger.debug(
+            f"[BASE_REAL] put_audio_frame called: chunk_shape={audio_chunk.shape}, datainfo={datainfo}")
+
+        # 转发给ASR（用于口型驱动）
         if hasattr(self, 'asr'):
             self.asr.put_audio_frame(audio_chunk, datainfo)
+            logger.debug(f"[BASE_REAL] Sent frame to asr")
         elif hasattr(self, 'lip_asr'):
             self.lip_asr.put_audio_frame(audio_chunk, datainfo)
+            logger.debug(
+                f"[BASE_REAL] Sent frame to lip_asr, queue_size={self.lip_asr.queue.qsize()}")
+
+        # 🆕 新增：直接转发给WebRTC音频轨道（用于前端播放）
+        try:
+            # 确保音频数据是正确的格式
+            frame = (audio_chunk * 32767).astype(np.int16)
+
+            # 创建音频帧 - 处理单声道和多声道输入：
+            # PyAV 对数组维度有严格要求，通常期望 (channels, samples) 的形状或一维单声道
+            if frame.ndim == 1:
+                frame_2d = frame.reshape(1, -1)
+                layout = 'mono'
+            elif frame.ndim == 2:
+                # 常见输入为 (samples, channels)，对于 s16 等 packed 格式，
+                # PyAV 更容易接受形状 (1, samples*channels)，即 interleaved 按行展开
+                frame_2d = frame.reshape(1, -1)
+                channels = frame.shape[1]
+                layout = 'stereo' if channels == 2 else 'mono'
+            else:
+                # 回退：强制为单声道
+                frame_2d = frame.reshape(1, -1)
+                layout = 'mono'
+
+            new_frame = AudioFrame.from_ndarray(
+                frame_2d, layout=layout, format='s16')
+            new_frame.sample_rate = 16000
+
+            # 如果 audio_track 未设置，则直接缓冲
+            if not (hasattr(self, 'audio_track') and self.audio_track):
+                with self._pending_audio_lock:
+                    self._pending_audio.append((new_frame, datainfo))
+                logger.warning(
+                    "[BASE_REAL] Audio track not yet available - buffered frame for later flush")
+            else:
+                # 尝试通过音轨队列的 loop 安全地放入帧，添加重试机制
+                queued = False
+                queue_loop = getattr(self.audio_track._queue, '_loop', None)
+                if queue_loop and queue_loop.is_running():
+                    max_retries = 3
+                    retry_delay = 0.01  # 10ms
+
+                    for attempt in range(max_retries):
+                        try:
+                            queue_loop.call_soon_threadsafe(
+                                self.audio_track._queue.put_nowait, (new_frame, datainfo))
+                            queued = True
+                            logger.debug(
+                                f"[BASE_REAL] Forwarded audio to WebRTC track: {datainfo}")
+                            break  # 成功，退出重试循环
+                        except asyncio.QueueFull:
+                            if attempt < max_retries - 1:
+                                logger.warning(
+                                    f"[BASE_REAL] Queue full, retrying {attempt + 1}/{max_retries}...")
+                                time.sleep(retry_delay)
+                            else:
+                                logger.error(
+                                    f"[BASE_REAL] Queue still full after {max_retries} attempts, dropping frame")
+                                # 清空队列中的旧帧，为新帧腾出空间
+                                try:
+                                    while self.audio_track._queue.qsize() > 100:
+                                        self.audio_track._queue.get_nowait()
+                                    logger.info(
+                                        "[BASE_REAL] Cleared old frames from queue")
+                                except:
+                                    pass
+                                queued = True  # 标记为已处理，避免重复缓冲
+                        except Exception as e:
+                            logger.error(
+                                f"[BASE_REAL] Unexpected error putting frame: {e}")
+                            break
+
+                # 如果无法通过队列 loop 放入（例如 loop 还没准备好），则回退到缓冲区
+                if not queued:
+                    with self._pending_audio_lock:
+                        self._pending_audio.append((new_frame, datainfo))
+                    logger.warning(
+                        "[BASE_REAL] Audio track loop not ready - buffered frame for later flush")
+        except Exception as e:
+            logger.error(
+                f"[BASE_REAL] Failed to forward audio to WebRTC: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+        if not hasattr(self, 'asr') and not hasattr(self, 'lip_asr'):
+            logger.warning(f"[BASE_REAL] No ASR implementation found!")
+
+    def _flush_pending_audio(self):
+        """尝试把缓冲区中的帧 flush 到音轨队列中。"""
+        if not hasattr(self, 'audio_track') or not self.audio_track:
+            return
+        with self._pending_audio_lock:
+            pending = self._pending_audio
+            self._pending_audio = []
+        if not pending:
+            return
+
+        queue_loop = getattr(self.audio_track._queue, '_loop',
+                             None) or getattr(self, 'loop', None)
+        if queue_loop and queue_loop.is_running():
+            sent = 0
+            for f, d in pending:
+                try:
+                    queue_loop.call_soon_threadsafe(
+                        self.audio_track._queue.put_nowait, (f, d))
+                    sent += 1
+                except Exception as e:
+                    logger.warning(
+                        f"[BASE_REAL] Failed to flush pending audio frame: {e}")
+            logger.info(
+                f"[BASE_REAL] Flushed {sent} pending audio frames to track")
+        else:
+            # 如果仍然没有事件循环，则重新放回缓冲区
+            with self._pending_audio_lock:
+                self._pending_audio = pending + self._pending_audio
+            logger.debug(
+                "[BASE_REAL] Could not flush pending audio: queue loop not running")
 
     def put_audio_file(self, filebyte, datainfo: dict = {}):
         input_stream = BytesIO(filebyte)
@@ -507,9 +634,10 @@ class BaseReal:
                         f"[PROCESS_FRAMES] Sent audio frame {i} to virtualcam")
                 else:  # webrtc
                     try:
-                        new_frame = AudioFrame(
-                            format='s16', layout='mono', samples=frame.shape[0])
-                        new_frame.planes[0].update(frame.tobytes())
+                        # 创建音频帧 - 需要2维数组
+                        frame_2d = frame.reshape(1, -1)
+                        new_frame = AudioFrame.from_ndarray(
+                            frame_2d, layout='mono', format='s16')
                         new_frame.sample_rate = 16000
 
                         if audio_track and audio_track._queue:

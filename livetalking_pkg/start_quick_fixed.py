@@ -205,12 +205,6 @@ def main():
     # 确认继续
     print("⚠️  注意: 此模式跳过健康检查，使用推荐配置")
     print()
-    response = input("是否继续? (y/n): ")
-    if response.lower() != 'y':
-        print("已取消")
-        return
-
-    print()
 
     # 设置配置
     opt = setup_config()

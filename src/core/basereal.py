@@ -121,16 +121,6 @@ class BaseReal:
         self._pending_audio = []  # list of (AudioFrame, datainfo)
         self._pending_audio_lock = threading.Lock()
 
-        # 🆕 终极噪音消除器
-        self.final_eliminator = None
-        self._init_final_noise_eliminator()
-
-    def _init_final_noise_eliminator(self):
-        """初始化终极噪音消除器 - 已禁用"""
-        # 暂时禁用噪音消除器以排查问题
-        self.final_eliminator = None
-        logger.info("[BASE_REAL] 噪音消除器已禁用")
-
     def send_custom_msg(self, msg):
         if self.datachannel:
             logger.info(
@@ -148,7 +138,7 @@ class BaseReal:
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
-        """简化的音频转发"""
+        """音频帧转发 - 简洁版"""
         # 转发给ASR（口型驱动）
         if hasattr(self, 'asr'):
             try:
@@ -166,10 +156,10 @@ class BaseReal:
             if not isinstance(audio_chunk, np.ndarray):
                 return
 
-            # 转换格式
-            frame = (audio_chunk * 32767).astype(np.int16)
+            # 直接转换，不做额外处理（TTS输出的音频已经是连续的）
+            frame = np.clip(audio_chunk * 32767, -32768, 32767).astype(np.int16)
             
-            # 确保320样本
+            # 确保320样本（20ms @ 16kHz）
             if len(frame) < 320:
                 padded = np.zeros(320, dtype=np.int16)
                 padded[:len(frame)] = frame
@@ -186,14 +176,12 @@ class BaseReal:
                     self._pending_audio.append((new_frame, datainfo))
                 return
 
-            # 🆕 修复：使用保存的loop而不是从队列获取
             if hasattr(self, 'loop') and self.loop and self.loop.is_running():
                 try:
                     self.loop.call_soon_threadsafe(
                         self.audio_track._queue.put_nowait, (new_frame, datainfo))
-                except Exception as e:
-                    # 队列满时静默忽略
-                    pass
+                except Exception:
+                    pass  # 队列满时丢弃
             else:
                 with self._pending_audio_lock:
                     self._pending_audio.append((new_frame, datainfo))
@@ -578,10 +566,13 @@ class BaseReal:
                     image = combine_frame
                     new_frame = VideoFrame.from_ndarray(image, format="bgr24")
                     if video_track and video_track._queue:
-                        asyncio.run_coroutine_threadsafe(
-                            video_track._queue.put((new_frame, None)), loop)
-                        logger.debug(
-                            f"[PROCESS_FRAMES] Sent video frame to WebRTC track")
+                        # 🆕 修复：使用call_soon_threadsafe + put_nowait，避免阻塞提高FPS
+                        try:
+                            loop.call_soon_threadsafe(
+                                video_track._queue.put_nowait, (new_frame, None))
+                        except Exception as queue_err:
+                            # 队列满时丢弃帧，避免阻塞
+                            logger.debug(f"[PROCESS_FRAMES] Video queue full, dropping frame")
                     else:
                         logger.debug(
                             f"[PROCESS_FRAMES] Video track or queue is None!")

@@ -124,6 +124,7 @@ class EdgeTTS(BaseTTS):
 
         self.input_stream.seek(0)
         stream = self.__create_bytes_stream(self.input_stream)
+        
         streamlen = stream.shape[0]
         idx = 0
         while streamlen >= self.chunk and self.state == State.RUNNING:
@@ -131,21 +132,15 @@ class EdgeTTS(BaseTTS):
             streamlen -= self.chunk
             if idx == 0:
                 eventpoint = {'status': 'start', 'text': text}
-                # eventpoint={'status':'start','text':text,'msgevent':textevent}
                 eventpoint.update(**textevent)
             elif streamlen < self.chunk:
                 eventpoint = {'status': 'end', 'text': text}
-                # eventpoint={'status':'end','text':text,'msgevent':textevent}
                 eventpoint.update(**textevent)
             self.parent.put_audio_frame(stream[idx:idx+self.chunk], eventpoint)
-            # pace production to real-time to avoid bursts
-            try:
-                time.sleep(self.chunk / self.sample_rate)
-            except Exception:
-                pass
+            # 按实时节奏发送
+            time.sleep(self.chunk / self.sample_rate)
             idx += self.chunk
-        # if streamlen>0:  #skip last frame(not 20ms)
-        #    self.queue.put(stream[idx:])
+        
         self.input_stream.seek(0)
         self.input_stream.truncate()
 
@@ -696,9 +691,12 @@ class DoubaoTTS(BaseTTS):
                     self.connection_pool.return_connection(conn)
                     return
 
-                # 先收集所有音频数据（字节级别）
-                all_audio_bytes = b''
-                chunk_count = 0
+                # 流式处理：边收边播
+                chunk_size = self.chunk  # 320 = 20ms @ 16kHz
+                audio_buffer = np.array([], dtype=np.float32)
+                first_chunk = True
+                total_sent = 0
+                start_time = None
 
                 while self.state == State.RUNNING:
                     result = conn.receive_audio_chunk(timeout=30.0)
@@ -707,61 +705,59 @@ class DoubaoTTS(BaseTTS):
                     if isinstance(result, bytes) and len(result) == 0:
                         continue
                     if isinstance(result, bytes) and len(result) > 0:
-                        chunk_count += 1
-                        all_audio_bytes += result
+                        # 确保字节对齐
+                        aligned_len = (len(result) // 2) * 2
+                        if aligned_len > 0:
+                            # 转换为float32
+                            new_samples = np.frombuffer(
+                                result[:aligned_len], dtype=np.int16
+                            ).astype(np.float32) / 32767.0
+                            audio_buffer = np.concatenate([audio_buffer, new_samples])
+                        
+                        # 当缓冲区有足够数据时，立即发送
+                        while len(audio_buffer) >= chunk_size and self.state == State.RUNNING:
+                            chunk = audio_buffer[:chunk_size].copy()
+                            audio_buffer = audio_buffer[chunk_size:]
+                            
+                            eventpoint = {}
+                            if first_chunk:
+                                eventpoint = {'status': 'start', 'text': text}
+                                eventpoint.update(textevent)
+                                first_chunk = False
+                                start_time = time.perf_counter()
+                            
+                            self.parent.put_audio_frame(chunk, eventpoint)
+                            total_sent += 1
+                            
+                            # 按实时节奏发送
+                            if start_time:
+                                expected_time = start_time + total_sent * 0.020
+                                sleep_time = expected_time - time.perf_counter()
+                                if sleep_time > 0:
+                                    time.sleep(sleep_time)
 
                 self.connection_pool.return_connection(conn)
                 
-                if not all_audio_bytes:
-                    logger.warning("[DOUBAO_TTS] 未收到音频数据")
-                    return
-                
-                # 🆕 关键：确保字节对齐（PCM 16bit = 2字节/采样点）
-                aligned_len = (len(all_audio_bytes) // 2) * 2
-                all_audio_bytes = all_audio_bytes[:aligned_len]
-                
-                # 转换为float32音频数据
-                audio_array = np.frombuffer(all_audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
-                
-                logger.info(f"[DOUBAO_TTS] 收到 {chunk_count} 块, 总样本数: {len(audio_array)}")
-                
-                # 统一推送，使用精确的时间控制
-                chunk_size = self.chunk  # 320 = 20ms @ 16kHz
-                total_chunks = len(audio_array) // chunk_size
-                first_chunk = True
-                
-                # 记录开始时间，用于精确的播放节奏控制
-                start_time = time.perf_counter()
-                
-                for i in range(total_chunks):
-                    if self.state != State.RUNNING:
-                        break
+                # 发送剩余数据（带end事件）
+                if len(audio_buffer) > 0 and self.state == State.RUNNING:
+                    # 填充到完整的chunk
+                    if len(audio_buffer) < chunk_size:
+                        padded = np.zeros(chunk_size, dtype=np.float32)
+                        padded[:len(audio_buffer)] = audio_buffer
+                        audio_buffer = padded
                     
-                    chunk = audio_array[i * chunk_size:(i + 1) * chunk_size].copy()
-                    
-                    # 设置事件
-                    eventpoint = {}
+                    chunk = audio_buffer[:chunk_size]
+                    eventpoint = {'status': 'end', 'text': text}
                     if first_chunk:
-                        eventpoint = {'status': 'start', 'text': text}
-                        eventpoint.update(textevent)
-                        first_chunk = False
-                    
-                    # 🆕 修复：在最后一个音频帧上携带 end 事件，不发送额外的静音帧
-                    if i == total_chunks - 1:
-                        eventpoint['status'] = 'end'
-                        eventpoint['text'] = text
-                    
+                        eventpoint['status'] = 'start'
                     self.parent.put_audio_frame(chunk, eventpoint)
-                    
-                    # 精确的时间控制：基于绝对时间
-                    expected_time = start_time + (i + 1) * 0.020
-                    current_time = time.perf_counter()
-                    sleep_time = expected_time - current_time
-                    
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
+                    total_sent += 1
+                elif total_sent > 0:
+                    # 在最后一个已发送的帧上标记end（通过发送一个静音帧）
+                    eventpoint = {'status': 'end', 'text': text}
+                    self.parent.put_audio_frame(np.zeros(chunk_size, dtype=np.float32), eventpoint)
                 
-                logger.info(f"[DOUBAO_TTS] 完成: {total_chunks} 个20ms块")
+                logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个20ms块")
 
             except Exception as e:
                 logger.error(f"[DOUBAO_TTS] 异常: {e}")

@@ -25,7 +25,7 @@ from typing import Dict, Optional, Set, Tuple, Union
 
 import numpy as np
 from aiortc import MediaStreamTrack
-from av import AudioFrame
+from av import AudioFrame, VideoFrame
 from av.frame import Frame
 from av.packet import Packet
 
@@ -114,22 +114,17 @@ class PlayerStreamTrack(MediaStreamTrack):
         # frame = self.frames[self.counter % 30]
         self._player._start(self)
 
-        # 安全获取帧，避免阻塞
         try:
             frame, eventpoint = await asyncio.wait_for(self._queue.get(), timeout=1.0)
         except asyncio.TimeoutError:
-            # 如果超时，检查是否需要停止
             if self.readyState != "live":
                 raise Exception("Track stopped")
-            # 返回静音帧避免卡死
             if self.kind == 'audio':
                 audio = np.zeros((1, 320), dtype=np.int16)
-                frame = AudioFrame.from_ndarray(
-                    audio, layout='mono', format='s16')
+                frame = AudioFrame.from_ndarray(audio, layout='mono', format='s16')
                 frame.sample_rate = 16000
                 eventpoint = {}
             else:
-                # 视频返回黑色帧
                 frame = VideoFrame.from_ndarray(
                     np.zeros((480, 640, 3), dtype=np.uint8), format="bgr24")
                 eventpoint = {}
@@ -139,7 +134,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             self.stop()
             raise Exception
 
-        # 音频时间戳处理
+        # 音频时间戳处理（使用基于样本的精确定时）
         if self.kind == 'audio':
             # 确保音频帧有正确的sample_rate和samples属性
             if not hasattr(frame, 'sample_rate'):
@@ -152,39 +147,33 @@ class PlayerStreamTrack(MediaStreamTrack):
 
             # 初始化时间基准
             if not hasattr(self, "_timestamp"):
+                prebuffer_frames = 5  # 约100ms
+                waited = 0.0
+                while self._queue.qsize() < prebuffer_frames and waited < 0.3:
+                    await asyncio.sleep(0.02)
+                    waited += 0.02
                 self._start = time.time()
                 self._timestamp = 0
-                self.current_frame_count = 0
-                mylogger.info('audio start:%f', self._start)
+                mylogger.info('audio start:%f (prebuffered %d frames)',
+                              self._start, self._queue.qsize())
 
-            # 计算当前帧的PTS
+            # 当前帧的 pts（以样本为单位）
             pts = self._timestamp
             frame.pts = pts
             frame.time_base = fractions.Fraction(1, sample_rate)
 
-            # 推进时间戳
+            # 推进 timestamp（供下一帧使用）
             self._timestamp += n_samples
-            self.current_frame_count += 1
 
-            # 精确时间控制 - 使用固定间隔
-            expected_time = self._start + \
-                (self.current_frame_count * AUDIO_PTIME)
+            # 基于样本数计算精确期望时间
+            expected_time = self._start + (self._timestamp / sample_rate)
             wait_time = expected_time - time.time()
 
-            # 简单的等待逻辑
             if wait_time > 0:
-                # 根据队列大小动态调整
-                queue_size = self._queue.qsize()
-                if queue_size > 40:
-                    wait_time = min(wait_time, 0.005)
-                elif queue_size > 20:
-                    wait_time = min(wait_time, 0.01)
-
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-            elif wait_time < -0.1:
+                await asyncio.sleep(wait_time)
+            elif wait_time < -0.5:
                 mylogger.warning(
-                    f"[WebRTC] Audio behind schedule: {wait_time:.3f}s")
+                    f"[WebRTC] Audio behind schedule by {-wait_time:.3f}s; queue_size={self._queue.qsize()}")
         else:
             pts, time_base = await self.next_timestamp()
             frame.pts = pts

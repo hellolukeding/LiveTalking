@@ -1,19 +1,4 @@
-###############################################################################
-#  Copyright (C) 2024 LiveTalking@lipku https://github.com/lipku/LiveTalking
-#  email: lipku@foxmail.com
-#
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#
-#       http://www.apache.org/licenses/LICENSE-2.0
-#
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
+
 from __future__ import annotations
 
 import asyncio
@@ -23,8 +8,10 @@ import gzip
 import hashlib
 import hmac
 import json
+import logging
 import os
 import queue
+import threading
 import time
 import uuid
 from enum import Enum
@@ -39,8 +26,14 @@ import numpy as np
 import requests
 import resampy
 import soundfile as sf
+import websocket  # pip install websocket-client
 import websockets
 from av import AudioFrame
+from websockets.sync.client import connect  # 也可以选择这种库，但下面示例用 websocket-client
+
+# 假设 BaseTTS 和 logger 已经定义
+# from somewhere import BaseTTS, logger, AudioFrame, State
+
 
 if TYPE_CHECKING:
     from basereal import BaseReal
@@ -80,13 +73,19 @@ class BaseTTS:
             self.msgqueue.put((msg, datainfo))
 
     def render(self, quit_event, audio_track=None, loop=None):
-        # 保存音频轨道引用
+        # 保存音频轨道引用（供parent使用）
         self.audio_track = audio_track
         self.loop = loop
 
-        # 🆕 修复：如果提供了音频轨道，直接发送到WebRTC
-        # 否则通过basereal转发（兼容旧逻辑）
-        self.direct_to_webrtc = (audio_track is not None)
+        # 🆕 如果优化器已存在，设置音频轨道引用
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
+            try:
+                # 更新优化器的音频轨道引用
+                if hasattr(self.optimizer, 'audio_track_ready'):
+                    self.optimizer.setup_direct_forwarding()
+                logger.info("[DOUBAO_TTS] 优化器已配置音频轨道")
+            except Exception as e:
+                logger.warning(f"[DOUBAO_TTS] 优化器配置失败: {e}")
 
         process_thread = Thread(target=self.process_tts, args=(quit_event,))
         process_thread.start()
@@ -139,6 +138,11 @@ class EdgeTTS(BaseTTS):
                 # eventpoint={'status':'end','text':text,'msgevent':textevent}
                 eventpoint.update(**textevent)
             self.parent.put_audio_frame(stream[idx:idx+self.chunk], eventpoint)
+            # pace production to real-time to avoid bursts
+            try:
+                time.sleep(self.chunk / self.sample_rate)
+            except Exception:
+                pass
             idx += self.chunk
         # if streamlen>0:  #skip last frame(not 20ms)
         #    self.queue.put(stream[idx:])
@@ -261,6 +265,11 @@ class FishTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
+                    # pace production to real-time
+                    try:
+                        time.sleep(self.chunk / self.sample_rate)
+                    except Exception:
+                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}
@@ -370,6 +379,11 @@ class SovitsTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
+                    # pace production to real-time
+                    try:
+                        time.sleep(self.chunk / self.sample_rate)
+                    except Exception:
+                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}
@@ -447,6 +461,11 @@ class CosyVoiceTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
+                    # pace production to real-time
+                    try:
+                        time.sleep(self.chunk / self.sample_rate)
+                    except Exception:
+                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}
@@ -579,6 +598,11 @@ class TencentTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
+                    # pace production to real-time
+                    try:
+                        time.sleep(self.chunk / self.sample_rate)
+                    except Exception:
+                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
                 last_stream = stream[idx:]  # get the remain stream
@@ -591,241 +615,618 @@ class TencentTTS(BaseTTS):
 
 
 class DoubaoTTS(BaseTTS):
+    """优化的DoubaoTTS - 使用WebSocket连接池 + 残余缓冲区"""
+
     def __init__(self, opt, parent):
         super().__init__(opt, parent)
-        # 从配置中读取火山引擎参数
         self.appid = os.getenv("DOUBAO_APPID")
-        self.token = os.getenv("DOUBAO_TOKEN")
-        # 从环境变量读取voice_id，如果不存在则使用opt.REF_FILE作为fallback
+        # 优先使用 ACCESS_TOKEN，然后是 AccessKeyID，最后是 TOKEN
+        self.access_key = os.getenv("DOUBAO_ACCESS_TOKEN") or os.getenv("DOUBAO_AccessKeyID") or os.getenv("DOUBAO_TOKEN")
         self.voice_id = os.getenv("DOUBAO_VOICE_ID") or opt.REF_FILE
-        _host = "openspeech.bytedance.com"
-        self.api_url = f"https://{_host}/api/v1/tts"
+        self.resource_id = os.getenv("DOUBAO_RESOURCE_ID")  # 新增：从环境变量读取
+        self.cluster = "volcano_tts"
+        
+        logger.info(f"[DOUBAO_TTS] 初始化: appid={self.appid}, access_key={self.access_key[:20] if self.access_key else 'None'}..., resource_id={self.resource_id}")
 
-    def doubao_voice(self, text):
-        """使用HTTP POST方式调用豆包TTS"""
-        start = time.perf_counter()
+        # WebSocket连接池
+        self.connection_pool = DoubaoConnectionPool(
+            appid=self.appid,
+            token=self.access_key,  # 使用access_key作为认证
+            voice_id=self.voice_id,
+            resource_id=self.resource_id,  # 传递resource_id
+            max_connections=3
+        )
 
-        # 构建请求 - 使用正确的格式
-        request_json = {
-            "app": {
-                "appid": self.appid,
-                "token": self.token,
-                "cluster": "volcano_tts"
-            },
-            "user": {
-                "uid": str(uuid.uuid4())
-            },
-            "audio": {
-                "voice_type": self.voice_id,
-                "encoding": "wav",
-                "rate": 16000,
-                "speed_ratio": 1.0,
-                "volume_ratio": 1.0,
-                "pitch_ratio": 1.0,
-            },
-            "request": {
-                "reqid": str(uuid.uuid4()),
-                "text": text,
-                "text_type": "plain",
-                "operation": "query"
-            }
-        }
+        # 优化器
+        self.optimizer = None
+        self._auto_integrate_optimizer()
+        
+        # 🆕 新增：处理锁和播放完成事件，防止抢帧
+        self._processing_lock = threading.Lock()
 
-        logger.debug(f"[DOUBAO_TTS] HTTP POST请求: {self.api_url}")
-        logger.debug(
-            f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
+        logger.info("[DOUBAO_TTS] 连接池版本初始化完成")
 
-        try:
-            # 发送HTTP POST请求
-            response = requests.post(
-                self.api_url,
-                json=request_json,
-                headers={"Content-Type": "application/json"},
-                timeout=30
-            )
+    def _auto_integrate_optimizer(self):
+        """自动集成优化器 - 已禁用"""
+        # 暂时禁用优化器，直接使用原始音频流
+        self.optimizer = None
+        logger.info("[DOUBAO_TTS] 优化器已禁用，使用原始音频流")
 
-            end = time.perf_counter()
-            logger.debug(f"[DOUBAO_TTS] 请求耗时: {end-start:.2f}s")
-
-            if response.status_code == 200:
-                result = response.json()
-
-                # 检查响应状态
-                if result.get("code", 0) != 3000:
-                    logger.error(
-                        f"[DOUBAO_TTS] API错误: code={result.get('code')}, message={result.get('message', 'Unknown error')}")
-                    return None
-
-                # 获取base64音频数据 - 支持两种格式
-                audio_base64 = None
-                if "data" in result:
-                    if isinstance(result["data"], dict):
-                        audio_base64 = result["data"].get("audio")
-                    elif isinstance(result["data"], str):
-                        audio_base64 = result["data"]
-
-                if not audio_base64:
-                    logger.error(f"[DOUBAO_TTS] 响应中没有音频数据: {result}")
-                    return None
-
-                # 解码base64
-                try:
-                    audio_bytes = base64.b64decode(audio_base64)
-                    logger.debug(
-                        f"[DOUBAO_TTS] 收到音频数据: {len(audio_bytes)} bytes")
-                    return audio_bytes
-                except Exception as e:
-                    logger.error(f"[DOUBAO_TTS] Base64解码失败: {e}")
-                    return None
-
-            else:
-                logger.error(
-                    f"[DOUBAO_TTS] HTTP错误 {response.status_code}: {response.text}")
-                return None
-
-        except Exception as e:
-            logger.error(f"[DOUBAO_TTS] 请求异常: {e}")
-            return None
+    def _parse_context_texts(self, text: str) -> tuple[str, list[str]]:
+        """解析文本中的 [] 包裹内容作为 context_texts
+        
+        例如: "[稍作停顿，轻轻眨眼]今天我们来聊一个有趣的话题。"
+        返回: ("今天我们来聊一个有趣的话题。", ["稍作停顿，轻轻眨眼"])
+        """
+        import re
+        context_texts = []
+        
+        # 匹配所有 [] 包裹的内容
+        pattern = r'\[([^\]]+)\]'
+        matches = re.findall(pattern, text)
+        
+        if matches:
+            context_texts = matches
+            # 移除 [] 及其内容，得到纯文本
+            clean_text = re.sub(pattern, '', text).strip()
+            logger.info(f"[DOUBAO_TTS] 解析到 context_texts: {context_texts}")
+            logger.info(f"[DOUBAO_TTS] 纯文本: {clean_text}")
+            return clean_text, context_texts
+        
+        return text, []
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
-        logger.debug(f"[DOUBAO_TTS] Starting text_to_audio for: '{text}'")
-        logger.debug(
-            f"[DOUBAO_TTS] AppID: {self.appid}, VoiceID: {self.voice_id}")
-
-        # 调用HTTP接口获取音频
-        audio_bytes = self.doubao_voice(text)
-
-        if audio_bytes is None:
-            logger.error("[DOUBAO_TTS] 音频生成失败")
-            # 发送静音帧避免阻塞
-            self.parent.put_audio_frame(
-                np.zeros(self.chunk, np.float32), {'status': 'error', 'text': text, 'error': 'TTS请求失败'})
+        
+        if not text.strip():
             return
+            
+        logger.info(f"[DOUBAO_TTS] 处理: {text[:30]}...")
 
-        try:
-            # 将音频字节转换为numpy数组
-            audio_array = np.frombuffer(
-                audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        with self._processing_lock:
+            conn = self.connection_pool.get_connection()
+            if not conn:
+                logger.error("[DOUBAO_TTS] 无法获取连接")
+                return
 
-            logger.debug(f"[DOUBAO_TTS] 音频数组形状: {audio_array.shape}")
+            try:
+                reqid = str(uuid.uuid4())
+                if not conn.send_text_request(text, reqid, context_texts=[]):
+                    logger.error("[DOUBAO_TTS] 发送请求失败")
+                    self.connection_pool.return_connection(conn)
+                    return
 
-            # 重采样（如果需要）
-            # 豆包返回的通常是16kHz，与我们的需求一致，所以可能不需要重采样
+                # 先收集所有音频数据（字节级别）
+                all_audio_bytes = b''
+                chunk_count = 0
 
-            # 流式处理音频
-            self.stream_audio(audio_array, msg)
+                while self.state == State.RUNNING:
+                    result = conn.receive_audio_chunk(timeout=30.0)
+                    if result is None:
+                        break
+                    if isinstance(result, bytes) and len(result) == 0:
+                        continue
+                    if isinstance(result, bytes) and len(result) > 0:
+                        chunk_count += 1
+                        all_audio_bytes += result
 
-            logger.debug(f"[DOUBAO_TTS] Completed text_to_audio for: '{text}'")
+                self.connection_pool.return_connection(conn)
+                
+                if not all_audio_bytes:
+                    logger.warning("[DOUBAO_TTS] 未收到音频数据")
+                    return
+                
+                # 🆕 关键：确保字节对齐（PCM 16bit = 2字节/采样点）
+                aligned_len = (len(all_audio_bytes) // 2) * 2
+                all_audio_bytes = all_audio_bytes[:aligned_len]
+                
+                # 转换为float32音频数据
+                audio_array = np.frombuffer(all_audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+                
+                logger.info(f"[DOUBAO_TTS] 收到 {chunk_count} 块, 总样本数: {len(audio_array)}")
+                
+                # 统一推送，使用精确的时间控制
+                chunk_size = self.chunk  # 320 = 20ms @ 16kHz
+                total_chunks = len(audio_array) // chunk_size
+                first_chunk = True
+                
+                # 记录开始时间，用于精确的播放节奏控制
+                start_time = time.perf_counter()
+                
+                for i in range(total_chunks):
+                    if self.state != State.RUNNING:
+                        break
+                    
+                    chunk = audio_array[i * chunk_size:(i + 1) * chunk_size].copy()
+                    
+                    # 设置事件
+                    eventpoint = {}
+                    if first_chunk:
+                        eventpoint = {'status': 'start', 'text': text}
+                        eventpoint.update(textevent)
+                        first_chunk = False
+                    
+                    # 🆕 修复：在最后一个音频帧上携带 end 事件，不发送额外的静音帧
+                    if i == total_chunks - 1:
+                        eventpoint['status'] = 'end'
+                        eventpoint['text'] = text
+                    
+                    self.parent.put_audio_frame(chunk, eventpoint)
+                    
+                    # 精确的时间控制：基于绝对时间
+                    expected_time = start_time + (i + 1) * 0.020
+                    current_time = time.perf_counter()
+                    sleep_time = expected_time - current_time
+                    
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                
+                logger.info(f"[DOUBAO_TTS] 完成: {total_chunks} 个20ms块")
 
-        except Exception as e:
-            logger.error(f"[DOUBAO_TTS] 音频处理失败: {e}")
-            self.parent.put_audio_frame(
-                np.zeros(self.chunk, np.float32), {'status': 'error', 'text': text, 'error': str(e)})
+            except Exception as e:
+                logger.error(f"[DOUBAO_TTS] 异常: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
 
-    def stream_audio(self, audio_array, msg: tuple[str, dict]):
-        """修复的流式音频处理 - 支持直接发送到WebRTC"""
-        text, textevent = msg
-        streamlen = audio_array.shape[0]
-        idx = 0
-        first = True
-
-        logger.debug(
-            f"[DOUBAO_TTS] Starting stream, total length: {streamlen}, direct_to_webrtc: {getattr(self, 'direct_to_webrtc', False)}")
-
-        # 🆕 关键修复：使用缓冲区处理不完整的音频块
-        buffer = np.array([], dtype=np.float32)
-        frames_sent = 0
-
-        while idx < streamlen and self.state == State.RUNNING:
-            # 添加到缓冲区
-            buffer = np.concatenate([buffer, audio_array[idx:idx+self.chunk]])
-
-            # 从缓冲区取出完整的320样本块
-            while len(buffer) >= self.chunk:
-                audio_chunk = buffer[:self.chunk]
-                buffer = buffer[self.chunk:]
-
-                eventpoint = {}
-                if first:
-                    eventpoint = {'status': 'start', 'text': text}
-                    eventpoint.update(**textevent)
-                    first = False
-
-                # 🆕 根据标志决定发送路径
-                if getattr(self, 'direct_to_webrtc', False):
-                    # 直接发送到WebRTC
-                    self._send_to_webrtc(audio_chunk, eventpoint)
-                else:
-                    # 通过basereal转发（兼容旧逻辑）
-                    self.parent.put_audio_frame(audio_chunk, eventpoint)
-
-                frames_sent += 1
-
-            idx += self.chunk
-
-        # 处理缓冲区剩余数据
-        if len(buffer) > 0 and self.state == State.RUNNING:
-            # 填充静音到完整块（只在最后）
-            padded_chunk = np.zeros(self.chunk, dtype=np.float32)
-            padded_chunk[:len(buffer)] = buffer
-
-            eventpoint = {'status': 'end', 'text': text}
-            eventpoint.update(**textevent)
-
-            # 🆕 根据标志决定发送路径
-            if getattr(self, 'direct_to_webrtc', False):
-                self._send_to_webrtc(padded_chunk, eventpoint)
-            else:
-                self.parent.put_audio_frame(padded_chunk, eventpoint)
-
-            frames_sent += 1
-        else:
-            # 发送结束事件
-            eventpoint = {'status': 'end', 'text': text}
-            eventpoint.update(**textevent)
-
-            # 🆕 根据标志决定发送路径
-            if getattr(self, 'direct_to_webrtc', False):
-                self._send_to_webrtc(
-                    np.zeros(self.chunk, np.float32), eventpoint)
-            else:
-                self.parent.put_audio_frame(
-                    np.zeros(self.chunk, np.float32), eventpoint)
-
-        logger.debug(
-            f"[DOUBAO_TTS] Stream completed, {frames_sent} frames sent")
+    def _send_end_event(self, textevent):
+        """发送结束事件 - 不发送静音帧避免滴答声"""
+        eventpoint = {'status': 'end', 'text': textevent.get('text', '')}
+        eventpoint.update(textevent)
+        # 🆕 修复：只发送事件，不发送静音帧
+        # 静音帧可能导致滴答声
+        if hasattr(self.parent, 'on_tts_end'):
+            self.parent.on_tts_end(eventpoint)
 
     def _send_to_webrtc(self, audio_chunk, eventpoint):
-        """直接发送到WebRTC音频轨道"""
+        """发送到WebRTC"""
         try:
-            # 转换为16-bit PCM
             frame = (audio_chunk * 32767).astype(np.int16)
             frame_2d = frame.reshape(1, -1)
-
-            # 创建AudioFrame
             audio_frame = AudioFrame.from_ndarray(
                 frame_2d, layout='mono', format='s16')
             audio_frame.sample_rate = 16000
 
-            # 发送到WebRTC队列
             if self.audio_track and self.loop:
                 try:
                     self.loop.call_soon_threadsafe(
                         self.audio_track._queue.put_nowait, (audio_frame, eventpoint))
-                    logger.debug(f"[DOUBAO_TTS] Directly sent to WebRTC")
-                except asyncio.QueueFull:
-                    logger.warning(
-                        f"[DOUBAO_TTS] WebRTC queue full, dropping frame")
-                except Exception as e:
-                    logger.error(f"[DOUBAO_TTS] Failed to send to WebRTC: {e}")
-            else:
-                logger.warning(
-                    f"[DOUBAO_TTS] Audio track or loop not available")
+                except:
+                    pass
         except Exception as e:
-            logger.error(
-                f"[DOUBAO_TTS] Failed to create/send audio frame: {e}")
+            logger.error(f"WebRTC发送失败: {e}")
 
+    def get_stats(self):
+        """获取统计信息"""
+        pool_stats = self.connection_pool.get_stats()
+        return {
+            "connection_pool": pool_stats,
+            "optimizer_enabled": self.optimizer is not None
+        }
+
+    def shutdown(self):
+        """关闭管理器"""
+        self.connection_pool.shutdown()
+        logger.info("[DOUBAO_TTS] 连接管理器已关闭")
+
+
+# WebSocket连接管理类
+class DoubaoWebSocketConnection:
+    """单个WebSocket连接包装器 - 基于火山引擎v3 API
+    
+    协议格式参考: https://www.volcengine.com/docs/6561/1719100
+    """
+
+    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None):
+        self.appid = appid
+        self.token = token
+        self.voice_id = voice_id
+        self.resource_id = resource_id  # 新增
+        self.cluster = "volcano_tts"
+
+        self.ws = None
+        self.is_connected = False
+        self.last_used = time.time()
+        self.request_count = 0
+        self.error_count = 0
+        self.lock = threading.Lock()
+
+    def _get_resource_id(self) -> str:
+        """获取资源ID - 直接使用配置的resource_id"""
+        if self.resource_id:
+            return self.resource_id
+        # 默认值
+        return "volc.service_type.10029"
+
+    def connect(self) -> bool:
+        """建立WebSocket连接 - 使用v3 API"""
+        if self.is_connected and self.ws:
+            return True
+
+        try:
+            # v3 API端点
+            api_url = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
+            
+            # 获取实际使用的 resource_id
+            actual_resource_id = self._get_resource_id()
+            logger.info(f"[WS_MANAGER] 使用 resource_id: {actual_resource_id}, voice_id: {self.voice_id}")
+            
+            # v3 API使用HTTP Headers认证
+            header = [
+                f"X-Api-App-Key: {self.appid}",
+                f"X-Api-Access-Key: {self.token}",
+                f"X-Api-Resource-Id: {actual_resource_id}",
+                f"X-Api-Connect-Id: {str(uuid.uuid4())}",
+            ]
+            
+            self.ws = websocket.create_connection(
+                api_url, 
+                timeout=10, 
+                header=header
+            )
+            self.is_connected = True
+            self.last_used = time.time()
+            logger.info(f"[WS_MANAGER] WebSocket v3连接成功建立")
+            return True
+        except Exception as e:
+            logger.error(f"[WS_MANAGER] WebSocket连接失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.is_connected = False
+            self.error_count += 1
+            return False
+
+    def send_text_request(self, text: str, reqid: str, context_texts: list[str] = None) -> bool:
+        """发送文本转语音请求 - 使用v3 API格式
+        
+        Args:
+            text: 要转换的文本
+            reqid: 请求ID
+            context_texts: 情感/动作提示列表，如 ["稍作停顿，轻轻眨眼"]
+        """
+        if not self.is_connected or not self.ws:
+            logger.warning("[WS_MANAGER] 连接未就绪，尝试重连...")
+            if not self.connect():
+                return False
+
+        try:
+            # v3 API请求格式
+            request_json = {
+                "user": {
+                    "uid": str(uuid.uuid4()),
+                },
+                "req_params": {
+                    "speaker": self.voice_id,
+                    "audio_params": {
+                        "format": "pcm",
+                        "sample_rate": 16000,
+                        "enable_timestamp": False,
+                    },
+                    "text": text,
+                },
+            }
+            
+            # 🆕 添加 context_texts 支持（情感/动作提示）
+            if context_texts and len(context_texts) > 0:
+                if "additions" not in request_json["req_params"]:
+                    request_json["req_params"]["additions"] = {}
+                request_json["req_params"]["additions"]["context_texts"] = context_texts
+                logger.info(f"[WS_MANAGER] 添加 context_texts: {context_texts}")
+
+            # v3 API二进制协议
+            # Header: 1字节(版本+header_size) + 1字节(消息类型+flags) + 1字节(序列化+压缩) + 1字节(保留)
+            header = bytearray(b'\x11\x10\x11\x00')
+            
+            # Payload: gzip压缩的JSON
+            payload_bytes = json.dumps(request_json).encode('utf-8')
+            payload_bytes = gzip.compress(payload_bytes)
+            
+            # 完整请求: header(4字节) + payload_size(4字节) + payload
+            full_request = bytearray(header)
+            full_request.extend(len(payload_bytes).to_bytes(4, 'big'))
+            full_request.extend(payload_bytes)
+
+            with self.lock:
+                self.ws.send_binary(bytes(full_request))
+                self.last_used = time.time()
+                self.request_count += 1
+
+            logger.debug(f"[WS_MANAGER] v3请求发送成功: text_len={len(text)}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[WS_MANAGER] 发送请求失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.error_count += 1
+            self.is_connected = False
+            return False
+
+    def receive_audio_chunk(self, timeout: float = 30.0):
+        """接收音频数据块 - 解析v3 API响应
+        
+        返回值:
+        - bytes: 音频数据
+        - b'': 继续接收（元数据或ACK）
+        - None: 传输结束或错误
+        """
+        if not self.is_connected or not self.ws:
+            logger.warning("[WS_MANAGER] 连接未就绪，无法接收数据")
+            return None
+
+        try:
+            self.ws.settimeout(timeout)
+            result = self.ws.recv()
+            
+            with self.lock:
+                self.last_used = time.time()
+
+            if not isinstance(result, bytes) or len(result) < 4:
+                logger.warning(f"[WS_MANAGER] 收到无效数据: type={type(result)}")
+                return None
+
+            # 解析响应头
+            header_size = (result[0] & 0x0f) * 4
+            message_type = (result[1] >> 4) & 0x0f
+            message_flags = result[1] & 0x0f
+            compression = result[2] & 0x0f
+            
+            payload = result[header_size:] if len(result) > header_size else b''
+
+            # 0xb = audio-only server response
+            if message_type == 0xb:
+                if message_flags == 0:
+                    return b''  # ACK，继续接收
+                else:
+                    if len(payload) >= 8:
+                        seq = int.from_bytes(payload[:4], "big", signed=True)
+                        
+                        if seq < 0:
+                            logger.debug("[WS_MANAGER] 收到音频结束标志 (seq < 0)")
+                            return None  # 结束
+                        
+                        # 🆕 修复：正确解析 payload 结构
+                        # payload = seq(4) + request_id_len(4) + request_id(N) + audio_len(4) + audio_data
+                        offset = 4  # 跳过 seq
+                        
+                        if len(payload) < offset + 4:
+                            return b''
+                        
+                        request_id_len = int.from_bytes(payload[offset:offset+4], "big")
+                        offset += 4 + request_id_len  # 跳过 request_id_len 和 request_id
+                        
+                        if len(payload) < offset + 4:
+                            return b''
+                        
+                        audio_len = int.from_bytes(payload[offset:offset+4], "big")
+                        offset += 4  # 跳过 audio_len
+                        
+                        audio_data = payload[offset:offset+audio_len]
+                        
+                        if len(audio_data) > 0:
+                            return audio_data
+                        
+                    return b''
+            
+            # 0x9 = full server response (元数据)
+            elif message_type == 0x9:
+                try:
+                    if compression == 1:
+                        payload = gzip.decompress(payload)
+                    response_str = payload.decode('utf-8', errors='ignore')
+                    # 检查是否是结束标志（空的JSON响应 {}）
+                    if response_str.strip() == '{}' or response_str.endswith('{}'):
+                        logger.debug("[WS_MANAGER] 收到元数据结束标志")
+                        return None
+                except Exception as e:
+                    logger.warning(f"[WS_MANAGER] 解析元数据失败: {e}")
+                return b''  # 继续接收
+            
+            # 0xf = error response
+            elif message_type == 0xf:
+                try:
+                    if len(payload) >= 8:
+                        error_code = int.from_bytes(payload[:4], "big")
+                        msg_payload = payload[8:]
+                        try:
+                            msg_payload = gzip.decompress(msg_payload)
+                        except:
+                            pass
+                        error_msg = msg_payload.decode('utf-8')
+                        logger.error(f"[WS_MANAGER] 错误 (code={error_code}): {error_msg}")
+                except Exception as e:
+                    logger.error(f"[WS_MANAGER] 解析错误失败: {e}")
+                return None
+            
+            return b''
+
+        except websocket.WebSocketTimeoutException:
+            logger.warning(f"[WS_MANAGER] 超时 ({timeout}s)")
+            return None
+        except Exception as e:
+            logger.error(f"[WS_MANAGER] 接收失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            with self.lock:
+                self.error_count += 1
+                self.is_connected = False
+            return None
+
+    def close(self):
+        """关闭连接"""
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+        self.is_connected = False
+        logger.info(f"[WS_MANAGER] WebSocket连接已关闭")
+
+    def is_idle(self, timeout: int = 300) -> bool:
+        """检查连接是否空闲超时"""
+        return time.time() - self.last_used > timeout
+
+    def is_healthy(self) -> bool:
+        """检查连接健康状态"""
+        return self.is_connected and self.error_count < 3
+
+
+class DoubaoConnectionPool:
+    """WebSocket连接池管理器"""
+
+    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, max_connections: int = 3):
+        self.appid = appid
+        self.token = token
+        self.voice_id = voice_id
+        self.resource_id = resource_id  # 新增
+        self.max_connections = max_connections
+
+        self.connections = []
+        self.available_connections = Queue()
+        self.lock = threading.Lock()
+        self.running = False
+
+        # 统计信息
+        self.total_requests = 0
+        self.total_reuses = 0
+
+        self._start_cleanup_thread()
+
+    def _start_cleanup_thread(self):
+        """启动清理线程"""
+        self.running = True
+        self.cleanup_thread = threading.Thread(
+            target=self._cleanup_worker, daemon=True)
+        self.cleanup_thread.start()
+
+    def _cleanup_worker(self):
+        """清理空闲连接"""
+        while self.running:
+            time.sleep(60)
+            try:
+                self._cleanup_idle_connections()
+            except Exception as e:
+                logger.error(f"[WS_POOL] 清理线程异常: {e}")
+
+    def _cleanup_idle_connections(self):
+        """清理空闲连接"""
+        with self.lock:
+            to_remove = []
+            for conn in self.connections:
+                if conn.is_idle(timeout=300):
+                    to_remove.append(conn)
+
+            for conn in to_remove:
+                if conn in self.connections:
+                    self.connections.remove(conn)
+                conn.close()
+                logger.info(f"[WS_POOL] 移除空闲连接，当前连接数: {len(self.connections)}")
+
+    def _create_connection(self):
+        """创建新连接（注意：调用时不要持有self.lock）"""
+        logger.debug(f"[WS_POOL] 正在创建新连接...")
+        
+        conn = DoubaoWebSocketConnection(self.appid, self.token, self.voice_id, self.resource_id)
+        if conn.connect():
+            with self.lock:
+                if len(self.connections) < self.max_connections:
+                    self.connections.append(conn)
+                    logger.info(
+                        f"[WS_POOL] 创建新连接成功，当前连接数: {len(self.connections)}")
+                    return conn
+                else:
+                    # 连接数已满，关闭新创建的连接
+                    conn.close()
+                    logger.warning(f"[WS_POOL] 连接数已满，关闭新连接")
+                    return None
+        else:
+            logger.error(f"[WS_POOL] 创建连接失败")
+        return None
+
+    def get_connection(self, timeout: float = 5.0):
+        """获取可用连接"""
+        start_time = time.time()
+        logger.debug(f"[WS_POOL] 开始获取连接...")
+
+        # 1. 尝试从可用队列获取
+        try:
+            conn = self.available_connections.get(timeout=0.1)
+            if conn and conn.is_healthy():
+                self.total_reuses += 1
+                logger.debug(f"[WS_POOL] 复用现有连接")
+                return conn
+        except:
+            pass
+
+        # 2. 检查是否可以创建新连接（不持有锁）
+        can_create = False
+        with self.lock:
+            can_create = len(self.connections) < self.max_connections
+        
+        if can_create:
+            conn = self._create_connection()
+            if conn:
+                return conn
+
+        # 3. 等待可用连接
+        logger.debug(f"[WS_POOL] 等待可用连接...")
+        while time.time() - start_time < timeout:
+            try:
+                conn = self.available_connections.get(timeout=0.5)
+                if conn and conn.is_healthy():
+                    self.total_reuses += 1
+                    logger.debug(f"[WS_POOL] 获取到可用连接")
+                    return conn
+            except:
+                pass
+
+            # 再次检查是否可以创建新连接
+            with self.lock:
+                can_create = len(self.connections) < self.max_connections
+            
+            if can_create:
+                conn = self._create_connection()
+                if conn:
+                    return conn
+
+        logger.error(f"[WS_POOL] 获取连接超时 ({timeout}s)")
+        return None
+
+    def return_connection(self, conn):
+        """归还连接到池"""
+        if not conn or not conn.is_healthy():
+            with self.lock:
+                if conn in self.connections:
+                    self.connections.remove(conn)
+                    conn.close()
+            return
+
+        if conn.error_count >= 3:
+            logger.warning(f"[WS_POOL] 连接错误次数过多，移除连接")
+            with self.lock:
+                if conn in self.connections:
+                    self.connections.remove(conn)
+                    conn.close()
+            return
+
+        self.available_connections.put(conn)
+
+    def get_stats(self):
+        """获取统计"""
+        return {
+            "total_connections": len(self.connections),
+            "available_connections": self.available_connections.qsize(),
+            "total_reuses": self.total_reuses,
+            "max_connections": self.max_connections
+        }
+
+    def shutdown(self):
+        """关闭所有连接"""
+        self.running = False
+        with self.lock:
+            for conn in self.connections:
+                conn.close()
+            self.connections.clear()
+        logger.info("[WS_POOL] 连接池已关闭")
 ###########################################################################################
 
 
@@ -1103,6 +1504,11 @@ class XTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
+                    # pace production to real-time
+                    try:
+                        time.sleep(self.chunk / self.sample_rate)
+                    except Exception:
+                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}

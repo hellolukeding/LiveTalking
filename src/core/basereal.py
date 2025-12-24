@@ -121,6 +121,16 @@ class BaseReal:
         self._pending_audio = []  # list of (AudioFrame, datainfo)
         self._pending_audio_lock = threading.Lock()
 
+        # 🆕 终极噪音消除器
+        self.final_eliminator = None
+        self._init_final_noise_eliminator()
+
+    def _init_final_noise_eliminator(self):
+        """初始化终极噪音消除器 - 已禁用"""
+        # 暂时禁用噪音消除器以排查问题
+        self.final_eliminator = None
+        logger.info("[BASE_REAL] 噪音消除器已禁用")
+
     def send_custom_msg(self, msg):
         if self.datachannel:
             logger.info(
@@ -138,105 +148,58 @@ class BaseReal:
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
-        # 简化的音频处理 - 只做格式转换和转发
-        logger.debug(
-            f"[BASE_REAL] put_audio_frame called: chunk_shape={audio_chunk.shape}, datainfo={datainfo}")
-
-        # 转发给ASR（用于口型驱动）
+        """简化的音频转发"""
+        # 转发给ASR（口型驱动）
         if hasattr(self, 'asr'):
             try:
                 self.asr.put_audio_frame(audio_chunk, datainfo)
-            except Exception as e:
-                logger.warning(f"[BASE_REAL] ASR forwarding failed: {e}")
+            except Exception:
+                pass
         elif hasattr(self, 'lip_asr'):
             try:
                 self.lip_asr.put_audio_frame(audio_chunk, datainfo)
-            except Exception as e:
-                logger.warning(f"[BASE_REAL] LipASR forwarding failed: {e}")
+            except Exception:
+                pass
 
-        # 简化的音频格式转换和WebRTC转发
+        # 转发给WebRTC
         try:
-            # 确保音频数据格式正确
             if not isinstance(audio_chunk, np.ndarray):
-                logger.error(
-                    f"[BASE_REAL] Invalid audio chunk type: {type(audio_chunk)}")
                 return
 
-            # 🆕 修复：直接处理音频块，不再分块
-            # TTS应该已经生成了正确的320样本块
-            chunk_size = 320  # 20ms at 16kHz
-
-            # 转换为正确的格式
+            # 转换格式
             frame = (audio_chunk * 32767).astype(np.int16)
+            
+            # 确保320样本
+            if len(frame) < 320:
+                padded = np.zeros(320, dtype=np.int16)
+                padded[:len(frame)] = frame
+                frame = padded
+            elif len(frame) > 320:
+                frame = frame[:320]
 
-            # 检查音频块大小
-            if len(frame) != chunk_size:
-                logger.warning(
-                    f"[BASE_REAL] Audio chunk size mismatch: {len(frame)} (expected {chunk_size})")
-
-                # 如果音频块太小，丢弃（避免噪音）
-                if len(frame) < chunk_size:
-                    logger.warning(
-                        f"[BASE_REAL] Dropping short audio chunk: {len(frame)} samples")
-                    return
-
-                # 如果音频块太大，截取前320个样本
-                frame = frame[:chunk_size]
-                logger.warning(
-                    f"[BASE_REAL] Truncating audio chunk to {chunk_size} samples")
-
-            # 创建音频帧
-            if frame.ndim == 1:
-                frame_2d = frame.reshape(1, -1)
-            else:
-                frame_2d = frame.reshape(1, -1)
-
-            new_frame = AudioFrame.from_ndarray(
-                frame_2d, layout='mono', format='s16')
+            frame_2d = frame.reshape(1, -1)
+            new_frame = AudioFrame.from_ndarray(frame_2d, layout='mono', format='s16')
             new_frame.sample_rate = 16000
-            # samples属性会自动计算，不需要手动设置
 
-            # 如果 audio_track 未设置，则缓冲
             if not (hasattr(self, 'audio_track') and self.audio_track):
                 with self._pending_audio_lock:
                     self._pending_audio.append((new_frame, datainfo))
-                logger.debug("[BASE_REAL] Audio track not ready, buffered")
                 return
 
-            # 简单的队列检查
-            queue_size = self.audio_track._queue.qsize()
-            if queue_size > 60:  # 队列过大，丢弃
-                logger.warning(
-                    f"[BASE_REAL] Queue too large ({queue_size}), dropping frame")
-                return
-
-            # 直接放入队列
-            queue_loop = getattr(self.audio_track._queue, '_loop', None)
-            if queue_loop and queue_loop.is_running():
+            # 🆕 修复：使用保存的loop而不是从队列获取
+            if hasattr(self, 'loop') and self.loop and self.loop.is_running():
                 try:
-                    queue_loop.call_soon_threadsafe(
+                    self.loop.call_soon_threadsafe(
                         self.audio_track._queue.put_nowait, (new_frame, datainfo))
-                    logger.debug(f"[BASE_REAL] Audio frame sent successfully")
-                    return
-                except asyncio.QueueFull:
-                    logger.warning(f"[BASE_REAL] Queue full, dropping frame")
-                    return
                 except Exception as e:
-                    logger.error(f"[BASE_REAL] Unexpected error: {e}")
-                    return
-
-            # 回退到缓冲区
-            with self._pending_audio_lock:
-                self._pending_audio.append((new_frame, datainfo))
-            logger.debug("[BASE_REAL] Loop not ready, buffered")
+                    # 队列满时静默忽略
+                    pass
+            else:
+                with self._pending_audio_lock:
+                    self._pending_audio.append((new_frame, datainfo))
 
         except Exception as e:
-            logger.error(f"[BASE_REAL] Failed to process audio frame: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-
-        if not hasattr(self, 'asr') and not hasattr(self, 'lip_asr'):
-            logger.warning(f"[BASE_REAL] No ASR implementation found!")
+            logger.error(f"[BASE_REAL] Audio error: {e}")
 
     def _flush_pending_audio(self):
         """尝试把缓冲区中的帧 flush 到音轨队列中。"""
@@ -248,8 +211,8 @@ class BaseReal:
         if not pending:
             return
 
-        queue_loop = getattr(self.audio_track._queue, '_loop',
-                             None) or getattr(self, 'loop', None)
+        # 🆕 修复：优先使用self.loop
+        queue_loop = getattr(self, 'loop', None)
         if queue_loop and queue_loop.is_running():
             sent = 0
             for f, d in pending:

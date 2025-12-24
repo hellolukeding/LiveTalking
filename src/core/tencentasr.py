@@ -62,8 +62,11 @@ except ImportError:
             import queue
 
             import numpy as np
+            # 🆕 修复打鼓噪音：使用更长的超时时间等待音频帧
+            # 原来10ms超时太短，导致TTS推送20ms间隔时频繁返回静音帧
+            # 改为25ms，略大于20ms的音频帧间隔，确保能等到下一帧
             try:
-                frame, eventpoint = self.queue.get(block=True, timeout=0.01)
+                frame, eventpoint = self.queue.get(block=True, timeout=0.025)
                 type = 0
             except queue.Empty:
                 if self.parent and self.parent.curr_state > 1:

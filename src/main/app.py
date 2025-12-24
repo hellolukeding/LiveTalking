@@ -700,8 +700,8 @@ if __name__ == '__main__':
                         default='', help="custom action json")
 
     # xtts gpt-sovits cosyvoice fishtts tencent doubao indextts2 azuretts edgetts
-    parser.add_argument('--tts', type=str, default='doubao',
-                        help="tts service type")
+    parser.add_argument('--tts', type=str, default=os.getenv('TTS_TYPE', 'edgetts'),
+                        help="tts service type (from env TTS_TYPE)")
     parser.add_argument('--REF_FILE', type=str, default="zh_female_xiaohe_uranus_bigtts",
                         help="参考文件名或语音模型ID，对于豆包TTS使用voice_id，如zh_female_xiaohe_uranus_bigtts")
     parser.add_argument('--REF_TEXT', type=str, default=None)

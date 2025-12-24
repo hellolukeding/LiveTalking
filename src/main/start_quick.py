@@ -40,20 +40,35 @@ def setup_config():
             self.avatar_id = 'wav2lip256_avatar1'
             self.batch_size = 16
 
-            # TTS配置 - 默认使用豆包TTS
-            self.tts = 'doubao'
-            self.REF_FILE = 'zh_female_xiaohe_uranus_bigtts'  # 豆包TTS语音
+            # TTS配置 - 从环境变量读取，如果没有则默认使用Edge TTS（免费）
+            tts_type = os.getenv('TTS_TYPE', 'edge')
+            self.tts = tts_type
+
+            # 根据TTS类型设置REF_FILE
+            if tts_type == 'doubao':
+                self.REF_FILE = os.getenv(
+                    'DOUBAO_VOICE_ID', 'zh_female_xiaohe_uranus_bigtts')
+            elif tts_type == 'tencent':
+                self.REF_FILE = os.getenv('TENCENT_VOICE_TYPE', '1001')
+            elif tts_type == 'azure':
+                self.REF_FILE = os.getenv(
+                    'AZURE_VOICE_NAME', 'zh-CN-XiaoxiaoNeural')
+            else:  # edge tts
+                self.REF_FILE = os.getenv(
+                    'EDGE_TTS_VOICE', 'zh-CN-YunxiNeural')
+
             self.REF_TEXT = None
             self.TTS_SERVER = 'http://127.0.0.1:9880'
 
-            # ASR配置 - 默认使用腾讯ASR
-            self.asr = 'tencent'
+            # ASR配置 - 从环境变量读取，默认使用Lip ASR（本地可用）
+            self.asr = os.getenv('ASR_TYPE', 'lip')
 
             # 传输配置
             self.transport = 'webrtc'
             self.push_url = 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream'
             self.max_session = 1
-            self.listenport = 8010
+            # 使用环境变量中的端口，如果没有则使用8011（避免8010被占用）
+            self.listenport = int(os.getenv('LISTEN_PORT', 8011))
 
             # 会话ID
             self.sessionid = 0
@@ -64,24 +79,7 @@ def setup_config():
 
         def update_from_env(self):
             """从环境变量更新配置"""
-            # TTS类型
-            tts_type = os.getenv('TTS_TYPE', 'edge')
-            if tts_type == 'doubao':
-                self.tts = 'doubao'
-                self.REF_FILE = os.getenv(
-                    'DOUBAO_VOICE_ID', 'zh_female_xiaohe_uranus_bigtts')
-            elif tts_type == 'tencent':
-                self.tts = 'tencent'
-                self.REF_FILE = os.getenv('TENCENT_VOICE_TYPE', '1001')
-            elif tts_type == 'azure':
-                self.tts = 'azure'
-                self.REF_FILE = os.getenv(
-                    'AZURE_VOICE_NAME', 'zh-CN-XiaoxiaoNeural')
-            else:
-                self.tts = 'edgetts'
-                self.REF_FILE = os.getenv(
-                    'EDGE_TTS_VOICE', 'zh-CN-YunxiNeural')
-
+            # TTS类型 - 已在__init__中处理，这里仅更新其他配置
             # ASR类型
             asr_type = os.getenv('ASR_TYPE', 'lip')
             self.asr = asr_type
@@ -144,11 +142,31 @@ def main():
     print()
 
     # 显示配置信息
+    opt = setup_config()  # 先获取配置用于显示
+    tts_name = {
+        'doubao': '豆包TTS',
+        'edgetts': 'Edge TTS (免费)',
+        'tencent': '腾讯TTS',
+        'azure': 'Azure TTS',
+        'gpt-sovits': 'GPT-SoVITS',
+        'xtts': 'XTTS',
+        'cosyvoice': 'CosyVoice',
+        'fishtts': 'FishTTS',
+        'indextts2': 'IndexTTS2'
+    }.get(opt.tts, opt.tts)
+
+    asr_name = {
+        'lip': 'Lip ASR (本地)',
+        'tencent': '腾讯ASR',
+        'funasr': 'FunASR',
+        'huber': 'Huber ASR'
+    }.get(opt.asr, opt.asr)
+
     print("📋 使用配置:")
-    print("  TTS: Edge TTS (免费)")
-    print("  ASR: Lip ASR (可用)")
+    print(f"  TTS: {tts_name}")
+    print(f"  ASR: {asr_name}")
     print("  模型: Wav2Lip")
-    print("  端口: 8010")
+    print(f"  端口: {opt.listenport}")
     print()
 
     # 确认继续

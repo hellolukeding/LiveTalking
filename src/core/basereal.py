@@ -114,6 +114,7 @@ class BaseReal:
         self.__loadcustom()
         self.datachannel = None
         self.loop = None
+        self.audio_track = None  # WebRTC 音频轨道引用
 
         # Pending audio frames queued when audio_track or its event loop is not ready
         # Use a thread-safe list to buffer frames and flush later when possible
@@ -138,7 +139,7 @@ class BaseReal:
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
-        """音频帧转发 - 简洁版"""
+        """音频帧转发 - 简化版"""
         # 转发给ASR（口型驱动）
         if hasattr(self, 'asr'):
             try:
@@ -156,7 +157,7 @@ class BaseReal:
             if not isinstance(audio_chunk, np.ndarray):
                 return
 
-            # 直接转换，不做额外处理（TTS输出的音频已经是连续的）
+            # 简单直接的转换
             frame = np.clip(audio_chunk * 32767, -32768, 32767).astype(np.int16)
             
             # 确保320样本（20ms @ 16kHz）
@@ -175,6 +176,10 @@ class BaseReal:
                 with self._pending_audio_lock:
                     self._pending_audio.append((new_frame, datainfo))
                 return
+
+            # 先 flush pending 帧
+            if self._pending_audio:
+                self._flush_pending_audio()
 
             if hasattr(self, 'loop') and self.loop and self.loop.is_running():
                 try:

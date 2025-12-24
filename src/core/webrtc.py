@@ -18,9 +18,8 @@
 import asyncio
 import fractions
 import logging
-import threading
 import time
-from typing import Optional, Set, Tuple, Union
+from typing import Optional, Set, Union
 
 import numpy as np
 from aiortc import MediaStreamTrack
@@ -32,7 +31,7 @@ from logger import logger as mylogger
 
 AUDIO_PTIME = 0.020  # 20ms audio packetization
 VIDEO_CLOCK_RATE = 90000
-VIDEO_PTIME = 1.0 / 25  # 25fps
+VIDEO_PTIME = 1.0 / 25  # 25fps = 40ms per frame
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 SAMPLE_RATE = 16000
 AUDIO_TIME_BASE = fractions.Fraction(1, SAMPLE_RATE)
@@ -43,12 +42,8 @@ logger = logging.getLogger(__name__)
 
 class PlayerStreamTrack(MediaStreamTrack):
     """
-    音视频轨道
+    音视频轨道 - 简化稳定版
     """
-    
-    # 🆕 类级别共享时间基准，确保音视频同步
-    _shared_start_time: float = None
-    _shared_start_lock = threading.Lock()
 
     def __init__(self, player, kind):
         super().__init__()
@@ -57,30 +52,13 @@ class PlayerStreamTrack(MediaStreamTrack):
         queue_size = 100 if kind == "audio" else 50
         self._queue = asyncio.Queue(maxsize=queue_size)
         self._last_frame = None
+        self._start = None
+        self._timestamp = 0
         
         if self.kind == 'video':
             self.framecount = 0
             self.lasttime = time.perf_counter()
             self.totaltime = 0
-
-    _start: float
-    _timestamp: int
-    
-    @classmethod
-    def get_shared_start_time(cls) -> float:
-        """获取共享的起始时间，确保音视频使用同一时间基准"""
-        with cls._shared_start_lock:
-            if cls._shared_start_time is None:
-                cls._shared_start_time = time.time()
-                mylogger.info(f'[SYNC] Shared start time initialized: {cls._shared_start_time}')
-            return cls._shared_start_time
-    
-    @classmethod
-    def reset_shared_start_time(cls):
-        """重置共享时间（用于新会话）"""
-        with cls._shared_start_lock:
-            cls._shared_start_time = None
-            mylogger.info('[SYNC] Shared start time reset')
 
     async def recv(self) -> Union[Frame, Packet]:
         self._player._start(self)
@@ -110,47 +88,34 @@ class PlayerStreamTrack(MediaStreamTrack):
             self.stop()
             raise Exception("Frame is None")
 
-        # 设置时间戳和控制发送节奏
+        # 设置时间戳
         if self.kind == 'audio':
             if not hasattr(frame, 'sample_rate'):
                 frame.sample_rate = SAMPLE_RATE
-            if not hasattr(frame, 'samples'):
-                frame.samples = 320
+            samples = getattr(frame, 'samples', 320)
 
-            sample_rate = frame.sample_rate
-            n_samples = frame.samples
-
-            if not hasattr(self, "_timestamp"):
-                # 🆕 使用共享时间基准
-                self._start = PlayerStreamTrack.get_shared_start_time()
+            if self._start is None:
+                self._start = time.time()
                 self._timestamp = 0
-                mylogger.info(f'[SYNC] Audio track using shared start: {self._start}')
+                mylogger.info(f'[AUDIO] Track started')
 
             frame.pts = self._timestamp
-            frame.time_base = fractions.Fraction(1, sample_rate)
-            self._timestamp += n_samples
-
-            # 弹性发送：允许超前0.5秒
-            expected_time = self._start + (self._timestamp / sample_rate)
-            time_ahead = expected_time - time.time()
-            
-            if time_ahead > 0.5:
-                await asyncio.sleep(time_ahead - 0.5)
+            frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
+            self._timestamp += samples
+            # 音频不做节奏控制，让WebRTC自己处理
         else:
-            if not hasattr(self, "_timestamp"):
-                # 🆕 使用共享时间基准
-                self._start = PlayerStreamTrack.get_shared_start_time()
+            if self._start is None:
+                self._start = time.time()
                 self._timestamp = 0
-                self._frame_count = 0
-                mylogger.info(f'[SYNC] Video track using shared start: {self._start}')
+                mylogger.info(f'[VIDEO] Track started')
 
             frame.pts = self._timestamp
             frame.time_base = VIDEO_TIME_BASE
             self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
-            self._frame_count = getattr(self, '_frame_count', 0) + 1
 
-            # 视频严格按帧率
-            expected_time = self._start + self._frame_count * VIDEO_PTIME
+            # 视频按帧率控制
+            frame_count = self._timestamp // int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+            expected_time = self._start + frame_count * VIDEO_PTIME
             wait_time = expected_time - time.time()
             if wait_time > 0:
                 await asyncio.sleep(wait_time)
@@ -179,11 +144,6 @@ class PlayerStreamTrack(MediaStreamTrack):
         if self._player is not None:
             self._player._stop(self)
             self._player = None
-        # 🆕 重置时间戳，以便下次重新初始化
-        if hasattr(self, '_timestamp'):
-            delattr(self, '_timestamp')
-        if hasattr(self, '_start'):
-            delattr(self, '_start')
 
 
 def player_worker_thread(quit_event, loop, container, audio_track, video_track):
@@ -193,8 +153,8 @@ def player_worker_thread(quit_event, loop, container, audio_track, video_track):
 class HumanPlayer:
 
     def __init__(self, nerfreal, format=None, options=None, timeout=None, loop=False, decode=True):
-        self.__thread: Optional[threading.Thread] = None
-        self.__thread_quit: Optional[threading.Event] = None
+        self.__thread = None
+        self.__thread_quit = None
         self.__started: Set[PlayerStreamTrack] = set()
         
         self.__audio = PlayerStreamTrack(self, kind="audio")
@@ -218,8 +178,8 @@ class HumanPlayer:
         mylogger.info(f"[HumanPlayer] Track started: {track.kind}")
 
         if self.__thread is None:
-            self.__thread_quit = threading.Event()
-            self.__thread = threading.Thread(
+            self.__thread_quit = asyncio.Event() if False else __import__('threading').Event()
+            self.__thread = __import__('threading').Thread(
                 name="media-player",
                 target=player_worker_thread,
                 args=(
@@ -241,8 +201,6 @@ class HumanPlayer:
             self.__thread_quit.set()
             self.__thread.join()
             self.__thread = None
-            # 🆕 重置共享时间基准，以便新会话重新初始化
-            PlayerStreamTrack.reset_shared_start_time()
 
         if not self.__started and self.__container is not None:
             self.__container = None

@@ -610,65 +610,34 @@ class TencentTTS(BaseTTS):
 
 
 class DoubaoTTS(BaseTTS):
-    """优化的DoubaoTTS - 使用WebSocket连接池 + 残余缓冲区"""
+    """DoubaoTTS - 简化稳定版"""
 
     def __init__(self, opt, parent):
         super().__init__(opt, parent)
         self.appid = os.getenv("DOUBAO_APPID")
-        # 优先使用 ACCESS_TOKEN，然后是 AccessKeyID，最后是 TOKEN
         self.access_key = os.getenv("DOUBAO_ACCESS_TOKEN") or os.getenv("DOUBAO_AccessKeyID") or os.getenv("DOUBAO_TOKEN")
         self.voice_id = os.getenv("DOUBAO_VOICE_ID") or opt.REF_FILE
-        self.resource_id = os.getenv("DOUBAO_RESOURCE_ID")  # 新增：从环境变量读取
+        self.resource_id = os.getenv("DOUBAO_RESOURCE_ID")
         self.cluster = "volcano_tts"
         
-        logger.info(f"[DOUBAO_TTS] 初始化: appid={self.appid}, access_key={self.access_key[:20] if self.access_key else 'None'}..., resource_id={self.resource_id}")
+        logger.info(f"[DOUBAO_TTS] 初始化: appid={self.appid}, voice_id={self.voice_id}")
 
-        # WebSocket连接池
+        # WebSocket连接池 - 直接使用16kHz
         self.connection_pool = DoubaoConnectionPool(
             appid=self.appid,
-            token=self.access_key,  # 使用access_key作为认证
+            token=self.access_key,
             voice_id=self.voice_id,
-            resource_id=self.resource_id,  # 传递resource_id
+            resource_id=self.resource_id,
+            sample_rate=16000,  # 直接使用16kHz，避免重采样
             max_connections=3
         )
 
-        # 优化器
         self.optimizer = None
-        self._auto_integrate_optimizer()
-        
-        # 🆕 新增：处理锁和播放完成事件，防止抢帧
         self._processing_lock = threading.Lock()
-
-        logger.info("[DOUBAO_TTS] 连接池版本初始化完成")
+        logger.info("[DOUBAO_TTS] 初始化完成")
 
     def _auto_integrate_optimizer(self):
-        """自动集成优化器 - 已禁用"""
-        # 暂时禁用优化器，直接使用原始音频流
-        self.optimizer = None
-        logger.info("[DOUBAO_TTS] 优化器已禁用，使用原始音频流")
-
-    def _parse_context_texts(self, text: str) -> tuple[str, list[str]]:
-        """解析文本中的 [] 包裹内容作为 context_texts
-        
-        例如: "[稍作停顿，轻轻眨眼]今天我们来聊一个有趣的话题。"
-        返回: ("今天我们来聊一个有趣的话题。", ["稍作停顿，轻轻眨眼"])
-        """
-        import re
-        context_texts = []
-        
-        # 匹配所有 [] 包裹的内容
-        pattern = r'\[([^\]]+)\]'
-        matches = re.findall(pattern, text)
-        
-        if matches:
-            context_texts = matches
-            # 移除 [] 及其内容，得到纯文本
-            clean_text = re.sub(pattern, '', text).strip()
-            logger.info(f"[DOUBAO_TTS] 解析到 context_texts: {context_texts}")
-            logger.info(f"[DOUBAO_TTS] 纯文本: {clean_text}")
-            return clean_text, context_texts
-        
-        return text, []
+        pass
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
@@ -676,7 +645,7 @@ class DoubaoTTS(BaseTTS):
         if not text.strip():
             return
             
-        logger.info(f"[DOUBAO_TTS] 处理: {text[:30]}...")
+        logger.info(f"[DOUBAO_TTS] 处理: {text[:50]}...")
 
         with self._processing_lock:
             conn = self.connection_pool.get_connection()
@@ -691,7 +660,7 @@ class DoubaoTTS(BaseTTS):
                     self.connection_pool.return_connection(conn)
                     return
 
-                # 流式处理：边收边播
+                # 简化的流式处理
                 chunk_size = self.chunk  # 320 = 20ms @ 16kHz
                 audio_buffer = np.array([], dtype=np.float32)
                 first_chunk = True
@@ -705,16 +674,14 @@ class DoubaoTTS(BaseTTS):
                     if isinstance(result, bytes) and len(result) == 0:
                         continue
                     if isinstance(result, bytes) and len(result) > 0:
-                        # 确保字节对齐
                         aligned_len = (len(result) // 2) * 2
                         if aligned_len > 0:
-                            # 转换为float32
                             new_samples = np.frombuffer(
                                 result[:aligned_len], dtype=np.int16
                             ).astype(np.float32) / 32767.0
                             audio_buffer = np.concatenate([audio_buffer, new_samples])
                         
-                        # 当缓冲区有足够数据时，立即发送
+                        # 发送完整的chunk
                         while len(audio_buffer) >= chunk_size and self.state == State.RUNNING:
                             chunk = audio_buffer[:chunk_size].copy()
                             audio_buffer = audio_buffer[chunk_size:]
@@ -729,7 +696,7 @@ class DoubaoTTS(BaseTTS):
                             self.parent.put_audio_frame(chunk, eventpoint)
                             total_sent += 1
                             
-                            # 按实时节奏发送
+                            # 实时节奏控制
                             if start_time:
                                 expected_time = start_time + total_sent * 0.020
                                 sleep_time = expected_time - time.perf_counter()
@@ -738,9 +705,8 @@ class DoubaoTTS(BaseTTS):
 
                 self.connection_pool.return_connection(conn)
                 
-                # 发送剩余数据（带end事件）
+                # 发送剩余数据
                 if len(audio_buffer) > 0 and self.state == State.RUNNING:
-                    # 填充到完整的chunk
                     if len(audio_buffer) < chunk_size:
                         padded = np.zeros(chunk_size, dtype=np.float32)
                         padded[:len(audio_buffer)] = audio_buffer
@@ -753,43 +719,15 @@ class DoubaoTTS(BaseTTS):
                     self.parent.put_audio_frame(chunk, eventpoint)
                     total_sent += 1
                 elif total_sent > 0:
-                    # 在最后一个已发送的帧上标记end（通过发送一个静音帧）
                     eventpoint = {'status': 'end', 'text': text}
                     self.parent.put_audio_frame(np.zeros(chunk_size, dtype=np.float32), eventpoint)
                 
-                logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个20ms块")
+                logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个chunk")
 
             except Exception as e:
                 logger.error(f"[DOUBAO_TTS] 异常: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-
-    def _send_end_event(self, textevent):
-        """发送结束事件 - 不发送静音帧避免滴答声"""
-        eventpoint = {'status': 'end', 'text': textevent.get('text', '')}
-        eventpoint.update(textevent)
-        # 🆕 修复：只发送事件，不发送静音帧
-        # 静音帧可能导致滴答声
-        if hasattr(self.parent, 'on_tts_end'):
-            self.parent.on_tts_end(eventpoint)
-
-    def _send_to_webrtc(self, audio_chunk, eventpoint):
-        """发送到WebRTC"""
-        try:
-            frame = (audio_chunk * 32767).astype(np.int16)
-            frame_2d = frame.reshape(1, -1)
-            audio_frame = AudioFrame.from_ndarray(
-                frame_2d, layout='mono', format='s16')
-            audio_frame.sample_rate = 16000
-
-            if self.audio_track and self.loop:
-                try:
-                    self.loop.call_soon_threadsafe(
-                        self.audio_track._queue.put_nowait, (audio_frame, eventpoint))
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"WebRTC发送失败: {e}")
 
     def get_stats(self):
         """获取统计信息"""
@@ -812,11 +750,12 @@ class DoubaoWebSocketConnection:
     协议格式参考: https://www.volcengine.com/docs/6561/1719100
     """
 
-    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None):
+    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, sample_rate: int = 24000):
         self.appid = appid
         self.token = token
         self.voice_id = voice_id
         self.resource_id = resource_id  # 新增
+        self.sample_rate = sample_rate  # 🆕 可配置采样率
         self.cluster = "volcano_tts"
 
         self.ws = None
@@ -894,7 +833,7 @@ class DoubaoWebSocketConnection:
                     "speaker": self.voice_id,
                     "audio_params": {
                         "format": "pcm",
-                        "sample_rate": 16000,
+                        "sample_rate": self.sample_rate,  # 🆕 使用配置的采样率
                         "enable_timestamp": False,
                     },
                     "text": text,
@@ -1069,11 +1008,12 @@ class DoubaoWebSocketConnection:
 class DoubaoConnectionPool:
     """WebSocket连接池管理器"""
 
-    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, max_connections: int = 3):
+    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, sample_rate: int = 24000, max_connections: int = 3):
         self.appid = appid
         self.token = token
         self.voice_id = voice_id
         self.resource_id = resource_id  # 新增
+        self.sample_rate = sample_rate  # 🆕 可配置采样率
         self.max_connections = max_connections
 
         self.connections = []
@@ -1121,7 +1061,7 @@ class DoubaoConnectionPool:
         """创建新连接（注意：调用时不要持有self.lock）"""
         logger.debug(f"[WS_POOL] 正在创建新连接...")
         
-        conn = DoubaoWebSocketConnection(self.appid, self.token, self.voice_id, self.resource_id)
+        conn = DoubaoWebSocketConnection(self.appid, self.token, self.voice_id, self.resource_id, self.sample_rate)
         if conn.connect():
             with self.lock:
                 if len(self.connections) < self.max_connections:

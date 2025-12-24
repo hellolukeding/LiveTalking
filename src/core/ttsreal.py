@@ -1006,163 +1006,118 @@ class DoubaoWebSocketConnection:
 
 
 class DoubaoConnectionPool:
-    """WebSocket连接池管理器"""
+    """WebSocket连接池管理器 - 预热连接版
+    
+    火山引擎TTS的WebSocket连接是单次请求的，
+    但我们可以预先建立连接等待使用，减少首次响应延迟。
+    """
 
-    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, sample_rate: int = 24000, max_connections: int = 3):
+    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, sample_rate: int = 16000, max_connections: int = 2):
         self.appid = appid
         self.token = token
         self.voice_id = voice_id
-        self.resource_id = resource_id  # 新增
-        self.sample_rate = sample_rate  # 🆕 可配置采样率
+        self.resource_id = resource_id
+        self.sample_rate = sample_rate
         self.max_connections = max_connections
 
-        self.connections = []
-        self.available_connections = Queue()
-        self.lock = threading.Lock()
-        self.running = False
+        # 预热连接队列
+        self._ready_connections = Queue(maxsize=max_connections)
+        self._lock = threading.Lock()
+        self._running = True
 
         # 统计信息
         self.total_requests = 0
-        self.total_reuses = 0
+        self.total_connections = 0
+        self.cache_hits = 0
 
-        self._start_cleanup_thread()
+        # 启动预热线程
+        self._warmup_thread = threading.Thread(target=self._warmup_worker, daemon=True)
+        self._warmup_thread.start()
 
-    def _start_cleanup_thread(self):
-        """启动清理线程"""
-        self.running = True
-        self.cleanup_thread = threading.Thread(
-            target=self._cleanup_worker, daemon=True)
-        self.cleanup_thread.start()
+        logger.info(f"[WS_POOL] 连接池初始化: sample_rate={sample_rate}, max_connections={max_connections}")
 
-    def _cleanup_worker(self):
-        """清理空闲连接"""
-        while self.running:
-            time.sleep(60)
+    def _warmup_worker(self):
+        """预热连接的后台线程"""
+        while self._running:
             try:
-                self._cleanup_idle_connections()
+                # 检查是否需要预热
+                if self._ready_connections.qsize() < self.max_connections:
+                    conn = self._create_new_connection()
+                    if conn:
+                        try:
+                            self._ready_connections.put(conn, timeout=1.0)
+                            logger.debug(f"[WS_POOL] 预热连接已就绪 (队列: {self._ready_connections.qsize()})")
+                        except:
+                            conn.close()
+                time.sleep(0.5)  # 每0.5秒检查一次
             except Exception as e:
-                logger.error(f"[WS_POOL] 清理线程异常: {e}")
+                logger.error(f"[WS_POOL] 预热线程异常: {e}")
+                time.sleep(1.0)
 
-    def _cleanup_idle_connections(self):
-        """清理空闲连接"""
-        with self.lock:
-            to_remove = []
-            for conn in self.connections:
-                if conn.is_idle(timeout=300):
-                    to_remove.append(conn)
-
-            for conn in to_remove:
-                if conn in self.connections:
-                    self.connections.remove(conn)
-                conn.close()
-                logger.info(f"[WS_POOL] 移除空闲连接，当前连接数: {len(self.connections)}")
-
-    def _create_connection(self):
-        """创建新连接（注意：调用时不要持有self.lock）"""
-        logger.debug(f"[WS_POOL] 正在创建新连接...")
+    def _create_new_connection(self):
+        """创建新连接"""
+        conn = DoubaoWebSocketConnection(
+            self.appid, self.token, self.voice_id, 
+            self.resource_id, self.sample_rate
+        )
         
-        conn = DoubaoWebSocketConnection(self.appid, self.token, self.voice_id, self.resource_id, self.sample_rate)
         if conn.connect():
-            with self.lock:
-                if len(self.connections) < self.max_connections:
-                    self.connections.append(conn)
-                    logger.info(
-                        f"[WS_POOL] 创建新连接成功，当前连接数: {len(self.connections)}")
-                    return conn
-                else:
-                    # 连接数已满，关闭新创建的连接
-                    conn.close()
-                    logger.warning(f"[WS_POOL] 连接数已满，关闭新连接")
-                    return None
-        else:
-            logger.error(f"[WS_POOL] 创建连接失败")
+            with self._lock:
+                self.total_connections += 1
+            return conn
         return None
 
-    def get_connection(self, timeout: float = 5.0):
-        """获取可用连接"""
-        start_time = time.time()
-        logger.debug(f"[WS_POOL] 开始获取连接...")
+    def get_connection(self, timeout: float = 10.0):
+        """获取连接 - 优先从预热队列获取"""
+        with self._lock:
+            self.total_requests += 1
 
-        # 1. 尝试从可用队列获取
+        # 1. 尝试从预热队列获取
         try:
-            conn = self.available_connections.get(timeout=0.1)
+            conn = self._ready_connections.get(timeout=0.1)
             if conn and conn.is_healthy():
-                self.total_reuses += 1
-                logger.debug(f"[WS_POOL] 复用现有连接")
+                with self._lock:
+                    self.cache_hits += 1
+                logger.debug(f"[WS_POOL] 使用预热连接 (命中率: {self.cache_hits}/{self.total_requests})")
                 return conn
+            elif conn:
+                conn.close()
         except:
             pass
 
-        # 2. 检查是否可以创建新连接（不持有锁）
-        can_create = False
-        with self.lock:
-            can_create = len(self.connections) < self.max_connections
-        
-        if can_create:
-            conn = self._create_connection()
-            if conn:
-                return conn
-
-        # 3. 等待可用连接
-        logger.debug(f"[WS_POOL] 等待可用连接...")
-        while time.time() - start_time < timeout:
-            try:
-                conn = self.available_connections.get(timeout=0.5)
-                if conn and conn.is_healthy():
-                    self.total_reuses += 1
-                    logger.debug(f"[WS_POOL] 获取到可用连接")
-                    return conn
-            except:
-                pass
-
-            # 再次检查是否可以创建新连接
-            with self.lock:
-                can_create = len(self.connections) < self.max_connections
-            
-            if can_create:
-                conn = self._create_connection()
-                if conn:
-                    return conn
-
-        logger.error(f"[WS_POOL] 获取连接超时 ({timeout}s)")
-        return None
+        # 2. 预热队列为空，创建新连接
+        logger.debug(f"[WS_POOL] 预热队列为空，创建新连接...")
+        return self._create_new_connection()
 
     def return_connection(self, conn):
-        """归还连接到池"""
-        if not conn or not conn.is_healthy():
-            with self.lock:
-                if conn in self.connections:
-                    self.connections.remove(conn)
-                    conn.close()
-            return
-
-        if conn.error_count >= 3:
-            logger.warning(f"[WS_POOL] 连接错误次数过多，移除连接")
-            with self.lock:
-                if conn in self.connections:
-                    self.connections.remove(conn)
-                    conn.close()
-            return
-
-        self.available_connections.put(conn)
+        """归还连接 - 直接关闭（火山引擎TTS连接不可复用）"""
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
 
     def get_stats(self):
         """获取统计"""
         return {
-            "total_connections": len(self.connections),
-            "available_connections": self.available_connections.qsize(),
-            "total_reuses": self.total_reuses,
-            "max_connections": self.max_connections
+            "total_connections": self.total_connections,
+            "total_requests": self.total_requests,
+            "cache_hits": self.cache_hits,
+            "ready_connections": self._ready_connections.qsize(),
         }
 
     def shutdown(self):
-        """关闭所有连接"""
-        self.running = False
-        with self.lock:
-            for conn in self.connections:
+        """关闭连接池"""
+        self._running = False
+        # 清空预热队列
+        while not self._ready_connections.empty():
+            try:
+                conn = self._ready_connections.get_nowait()
                 conn.close()
-            self.connections.clear()
+            except:
+                pass
         logger.info("[WS_POOL] 连接池已关闭")
+
 ###########################################################################################
 
 

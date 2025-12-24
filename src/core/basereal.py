@@ -159,18 +159,19 @@ class BaseReal:
 
             # 简单直接的转换
             frame = np.clip(audio_chunk * 32767, -32768, 32767).astype(np.int16)
-            
-            # 确保320样本（20ms @ 16kHz）
-            if len(frame) < 320:
-                padded = np.zeros(320, dtype=np.int16)
+
+            # Use configured chunk/sample size instead of hard-coded 320
+            expected_samples = getattr(self, 'chunk', 320)
+            if len(frame) < expected_samples:
+                padded = np.zeros(expected_samples, dtype=np.int16)
                 padded[:len(frame)] = frame
                 frame = padded
-            elif len(frame) > 320:
-                frame = frame[:320]
+            elif len(frame) > expected_samples:
+                frame = frame[:expected_samples]
 
             frame_2d = frame.reshape(1, -1)
             new_frame = AudioFrame.from_ndarray(frame_2d, layout='mono', format='s16')
-            new_frame.sample_rate = 16000
+            new_frame.sample_rate = getattr(self, 'sample_rate', 16000)
 
             if not (hasattr(self, 'audio_track') and self.audio_track):
                 with self._pending_audio_lock:
@@ -208,14 +209,36 @@ class BaseReal:
         queue_loop = getattr(self, 'loop', None)
         if queue_loop and queue_loop.is_running():
             sent = 0
+            failed = []
+
+            async def _try_put(q, item):
+                try:
+                    q.put_nowait(item)
+                    return True
+                except asyncio.QueueFull:
+                    return False
+
             for f, d in pending:
                 try:
-                    queue_loop.call_soon_threadsafe(
-                        self.audio_track._queue.put_nowait, (f, d))
-                    sent += 1
+                    fut = asyncio.run_coroutine_threadsafe(
+                        _try_put(self.audio_track._queue, (f, d)), queue_loop)
+                    ok = fut.result(timeout=0.2)
+                    if ok:
+                        sent += 1
+                    else:
+                        failed.append((f, d))
+                        break  # queue full, stop and requeue the rest
                 except Exception as e:
                     logger.warning(
                         f"[BASE_REAL] Failed to flush pending audio frame: {e}")
+                    failed.append((f, d))
+                    break
+
+            # 如果有未发送的帧，放回_pending_audio头部
+            if failed:
+                with self._pending_audio_lock:
+                    self._pending_audio = failed + self._pending_audio
+
             logger.info(
                 f"[BASE_REAL] Flushed {sent} pending audio frames to track")
         else:

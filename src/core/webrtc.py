@@ -65,7 +65,7 @@ class PlayerStreamTrack(MediaStreamTrack):
 
         # 获取帧
         try:
-            frame, eventpoint = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+            frame, eventpoint = await asyncio.wait_for(self._queue.get(), timeout=2.0)
             if frame is not None:
                 self._last_frame = frame
         except asyncio.TimeoutError:
@@ -73,9 +73,16 @@ class PlayerStreamTrack(MediaStreamTrack):
                 raise Exception("Track stopped")
             
             if self.kind == 'audio':
-                audio = np.zeros((1, 320), dtype=np.int16)
+                # Determine expected samples and sample_rate from player/container
+                try:
+                    sr, expected_samples = self._player.get_audio_params()
+                except Exception:
+                    sr = SAMPLE_RATE
+                    expected_samples = int(SAMPLE_RATE * AUDIO_PTIME)
+
+                audio = np.zeros((1, expected_samples), dtype=np.int16)
                 frame = AudioFrame.from_ndarray(audio, layout='mono', format='s16')
-                frame.sample_rate = SAMPLE_RATE
+                frame.sample_rate = sr
             else:
                 if self._last_frame is not None:
                     frame = self._last_frame
@@ -90,9 +97,21 @@ class PlayerStreamTrack(MediaStreamTrack):
 
         # 设置时间戳
         if self.kind == 'audio':
+            # Use frame.sample_rate/samples when available, otherwise query player
             if not hasattr(frame, 'sample_rate'):
-                frame.sample_rate = SAMPLE_RATE
-            samples = getattr(frame, 'samples', 320)
+                try:
+                    sr, _ = self._player.get_audio_params()
+                except Exception:
+                    sr = SAMPLE_RATE
+                frame.sample_rate = sr
+
+            samples = getattr(frame, 'samples', None)
+            if samples is None:
+                try:
+                    _, expected_samples = self._player.get_audio_params()
+                except Exception:
+                    expected_samples = int(SAMPLE_RATE * AUDIO_PTIME)
+                samples = expected_samples
 
             if self._start is None:
                 self._start = time.time()
@@ -100,7 +119,7 @@ class PlayerStreamTrack(MediaStreamTrack):
                 mylogger.info(f'[AUDIO] Track started')
 
             frame.pts = self._timestamp
-            frame.time_base = fractions.Fraction(1, SAMPLE_RATE)
+            frame.time_base = fractions.Fraction(1, frame.sample_rate)
             self._timestamp += samples
             # 音频不做节奏控制，让WebRTC自己处理
         else:
@@ -156,10 +175,19 @@ class HumanPlayer:
         self.__thread = None
         self.__thread_quit = None
         self.__started: Set[PlayerStreamTrack] = set()
-        
+
         self.__audio = PlayerStreamTrack(self, kind="audio")
         self.__video = PlayerStreamTrack(self, kind="video")
         self.__container = nerfreal
+
+    def get_audio_params(self):
+        """Return (sample_rate, expected_samples) used for audio frames."""
+        container = getattr(self, '_HumanPlayer__container', None)
+        if container is not None:
+            sr = getattr(container, 'sample_rate', SAMPLE_RATE)
+            expected = getattr(container, 'chunk', int(sr * AUDIO_PTIME))
+            return sr, expected
+        return SAMPLE_RATE, int(SAMPLE_RATE * AUDIO_PTIME)
 
     def notify(self, eventpoint):
         if self.__container is not None:

@@ -32,12 +32,12 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 from av import AudioFrame, VideoFrame
-from tqdm import tqdm
-
 from basereal import BaseReal
 from lipasr import LipASR
 from logger import logger
 from tencentasr import TencentApiAsr
+from tqdm import tqdm
+
 from wav2lip.models.wav2lip_v2 import Wav2Lip
 
 # from imgcache import ImgCache
@@ -153,7 +153,8 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
 
         if is_all_silence:
             for i in range(batch_size):
-                item = (None, __mirror_index(length, index), audio_frames[i*2:i*2+2])
+                item = (None, __mirror_index(length, index),
+                        audio_frames[i*2:i*2+2])
                 try:
                     res_frame_queue.put_nowait(item)
                 except queue.Full:
@@ -167,10 +168,12 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                     except queue.Full:
                         if owner is not None:
                             owner.res_drop_count += 1
-                        logger.warning(f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner,'res_drop_count',0)}")
+                        logger.warning(
+                            f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner, 'res_drop_count', 0)}")
                 index = index + 1
             batch_time = time.perf_counter() - starttime
-            logger.debug(f"[LIPREAL] produced {batch_size} silence frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
+            logger.debug(
+                f"[LIPREAL] produced {batch_size} silence frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
         else:
             # print('infer=======')
             t = time.perf_counter()
@@ -206,7 +209,8 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                 count = 0
                 counttime = 0
             for i, res_frame in enumerate(pred):
-                item = (res_frame, __mirror_index(length, index), audio_frames[i*2:i*2+2])
+                item = (res_frame, __mirror_index(
+                    length, index), audio_frames[i*2:i*2+2])
                 try:
                     res_frame_queue.put_nowait(item)
                 except queue.Full:
@@ -220,10 +224,12 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                     except queue.Full:
                         if owner is not None:
                             owner.res_drop_count += 1
-                        logger.warning(f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner,'res_drop_count',0)}")
+                        logger.warning(
+                            f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner, 'res_drop_count', 0)}")
                 index = index + 1
             batch_time = time.perf_counter() - starttime
-            logger.debug(f"[LIPREAL] produced {len(pred)} frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
+            logger.debug(
+                f"[LIPREAL] produced {len(pred)} frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
             # print('total batch time:',time.perf_counter()-starttime)
     logger.debug('lipreal inference processor stop')
 
@@ -263,6 +269,9 @@ class LipReal(BaseReal):
         self.asr_audio_buffer = []
         self.asr_buffer_lock = mp.Lock()
 
+        # 防止并发调用腾讯 ASR（避免多个重叠请求导致排队延迟）
+        self._asr_running = False
+
         self.render_event = mp.Event()
 
     # def __del__(self):
@@ -285,28 +294,56 @@ class LipReal(BaseReal):
         Args:
             audio_data: 音频数据 (bytes)
         """
+        # 如果已有 ASR 任务在运行，则跳过本次触发以减少排队延迟
+        if getattr(self, '_asr_running', False):
+            logger.debug(
+                "[Tencent ASR] Previous ASR task still running, skip this trigger")
+            return None
+
         try:
+            self._asr_running = True
             logger.debug("[Tencent ASR] Starting recognition...")
 
-            # 如果传入的是 numpy 数组或列表，使用后台线程快速转换为 WAV，避免在渲染主循环中阻塞
             import numpy as _np
+            total_start = time.perf_counter()
+
+            # 转换（如果需要）
+            convert_start = time.perf_counter()
             if hasattr(audio_data, 'dtype') or isinstance(audio_data, (list, tuple)):
                 loop = asyncio.get_running_loop()
                 wav_bytes = await loop.run_in_executor(None, self.tencent_asr._pcm_to_wav_bytes, _np.array(audio_data, dtype=_np.float32), 16000)
             else:
                 wav_bytes = audio_data
+            convert_ms = (time.perf_counter() - convert_start) * 1000
 
+            # 请求识别
+            req_start = time.perf_counter()
             text = await self.tencent_asr.recognize(wav_bytes)
-            logger.debug(f"[Tencent ASR] Recognized: {text}")
+            req_ms = (time.perf_counter() - req_start) * 1000
 
-            # 将识别结果发送到数据通道或进行其他处理
+            total_ms = (time.perf_counter() - total_start) * 1000
+            logger.debug(
+                f"[Tencent ASR METRICS] convert_ms={convert_ms:.1f} req_ms={req_ms:.1f} total_ms={total_ms:.1f} success={bool(text)}")
+
             if text:
                 self.send_custom_msg(f"ASR_RESULT:{text}")
 
             return text
         except Exception as e:
+            # 记录失败的时序埋点（如果可能）
+            try:
+                total_ms = (time.perf_counter() - total_start) * 1000
+                logger.debug(
+                    f"[Tencent ASR METRICS] total_ms={total_ms:.1f} success=False error={e}")
+            except Exception:
+                pass
             logger.error(f"[Tencent ASR] Error: {e}")
             return None
+        finally:
+            try:
+                self._asr_running = False
+            except Exception:
+                pass
 
     def _collect_audio_data(self, duration_ms: int = 2000):
         """
@@ -320,7 +357,8 @@ class LipReal(BaseReal):
         with self.asr_buffer_lock:
             if len(self.asr_audio_buffer) > 0:
                 samples_needed = int(16000 * duration_ms / 1000)
-                audio_data = np.array(self.asr_audio_buffer[:samples_needed], dtype=np.float32)
+                audio_data = np.array(
+                    self.asr_audio_buffer[:samples_needed], dtype=np.float32)
                 self.asr_audio_buffer = self.asr_audio_buffer[samples_needed:]
                 return audio_data
 
@@ -360,8 +398,10 @@ class LipReal(BaseReal):
         while getattr(self, '_metrics_running', False):
             try:
                 video_drops = getattr(self, '_video_drop_count', 0)
-                res_qsize = self.res_frame_queue.qsize() if hasattr(self, 'res_frame_queue') else -1
-                logger.info(f"[METRICS] res_drop_count={getattr(self,'res_drop_count',0)} video_drop={video_drops} res_qsize={res_qsize}")
+                res_qsize = self.res_frame_queue.qsize() if hasattr(
+                    self, 'res_frame_queue') else -1
+                logger.info(
+                    f"[METRICS] res_drop_count={getattr(self, 'res_drop_count', 0)} video_drop={video_drops} res_qsize={res_qsize}")
             except Exception:
                 pass
             time.sleep(10)
@@ -386,8 +426,8 @@ class LipReal(BaseReal):
 
         infer_quit_event = Event()
         infer_thread = Thread(target=inference, args=(infer_quit_event, self.batch_size, self.face_list_cycle,
-                                  self.lip_asr.feat_queue, self.lip_asr.output_queue, self.res_frame_queue,
-                                  self.model, self))  # mp.Process
+                                                      self.lip_asr.feat_queue, self.lip_asr.output_queue, self.res_frame_queue,
+                                                      self.model, self))  # mp.Process
         infer_thread.start()
 
         process_quit_event = Event()
@@ -422,13 +462,39 @@ class LipReal(BaseReal):
                     # 收集1秒音频作为单次识别单元，避免过长导致异步任务/延迟
                     audio_data = self._collect_audio_data(1000)
                     if len(audio_data) > 1000:  # 确保有足够的音频数据
-                        if loop and loop.is_running():
-                            asyncio.create_task(
-                                self._run_tencent_asr(audio_data))
-                        else:
-                            # 如果没有事件循环，同步运行
-                            text = asyncio.run(
-                                self._run_tencent_asr(audio_data))
+                        try:
+                            # 优先将协程安全地提交到传入的事件循环（如果在运行）
+                            if loop is not None and getattr(loop, 'is_running', lambda: False)():
+                                try:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self._run_tencent_asr(audio_data), loop)
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to schedule Tencent ASR on provided loop: {e}; will run in background thread")
+
+                                    def _bg():
+                                        try:
+                                            asyncio.run(
+                                                self._run_tencent_asr(audio_data))
+                                        except Exception as e:
+                                            logger.warning(
+                                                f"Background ASR run failed: {e}")
+
+                                    Thread(target=_bg, daemon=True).start()
+                            else:
+                                # 没有可用的运行中事件循环，改为在后台线程中运行协程，避免阻塞渲染主循环或抛出 "no running event loop"
+
+                                def _bg_run():
+                                    try:
+                                        asyncio.run(
+                                            self._run_tencent_asr(audio_data))
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"Background ASR run failed: {e}")
+
+                                Thread(target=_bg_run, daemon=True).start()
+                        except Exception as e:
+                            logger.warning(f"Failed to run Tencent ASR: {e}")
                 except Exception as e:
                     logger.warning(f"Failed to run Tencent ASR: {e}")
 

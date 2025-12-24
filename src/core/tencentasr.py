@@ -25,76 +25,87 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
+# Ensure a `logger` is available; prefer project `logger`, otherwise provide a lightweight fallback.
 try:
-    from baseasr import BaseASR
     from logger import logger
-except ImportError:
-    # Fallback for standalone usage
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent))
+except Exception:
+    class MockLogger:
+        def debug(self, msg, *args):
+            print(f"DEBUG:{msg % args if args else msg}")
 
-    class BaseASR:
-        def __init__(self, opt, parent=None):
-            self.opt = opt
-            self.parent = parent
-            self.fps = opt.fps
-            self.sample_rate = 16000
-            self.chunk = self.sample_rate // self.fps
-            from queue import Queue
+        def info(self, msg, *args):
+            print(f"INFO:{msg % args if args else msg}")
 
-            import torch.multiprocessing as mp
-            self.queue = Queue()
-            self.output_queue = mp.Queue()
-            self.batch_size = opt.batch_size
-            self.frames = []
-            self.stride_left_size = opt.l
-            self.stride_right_size = opt.r
-            self.feat_queue = mp.Queue(2)
+        def warning(self, msg, *args):
+            print(f"WARNING:{msg % args if args else msg}")
 
-        def flush_talk(self):
+        def error(self, msg, *args):
+            print(f"ERROR:{msg % args if args else msg}")
+
+    logger = MockLogger()
+
+
+class BaseASR:
+    def __init__(self, opt, parent=None):
+        self.opt = opt
+        self.parent = parent
+        self.fps = getattr(opt, 'fps', 30)
+        self.sample_rate = 16000
+        self.chunk = self.sample_rate // self.fps
+        from queue import Queue
+
+        import torch.multiprocessing as mp
+        self.queue = Queue()
+        self.output_queue = mp.Queue()
+        self.batch_size = getattr(opt, 'batch_size', 1)
+        self.frames = []
+        self.stride_left_size = getattr(opt, 'l', 0)
+        self.stride_right_size = getattr(opt, 'r', 0)
+        self.feat_queue = mp.Queue(2)
+
+    def flush_talk(self):
+        try:
             self.queue.queue.clear()
-
-        def put_audio_frame(self, audio_chunk, datainfo: dict):
-            self.queue.put((audio_chunk, datainfo))
-
-        def get_audio_frame(self):
-            import queue
-
-            import numpy as np
-            # 🆕 修复打鼓噪音：使用更长的超时时间等待音频帧
-            # 原来10ms超时太短，导致TTS推送20ms间隔时频繁返回静音帧
-            # 改为25ms，略大于20ms的音频帧间隔，确保能等到下一帧
-            try:
-                frame, eventpoint = self.queue.get(block=True, timeout=0.025)
-                type = 0
-            except queue.Empty:
-                if self.parent and self.parent.curr_state > 1:
-                    frame = self.parent.get_audio_stream(
-                        self.parent.curr_state)
-                    type = self.parent.curr_state
-                else:
-                    frame = np.zeros(self.chunk, dtype=np.float32)
-                    type = 1
-                eventpoint = None
-            return frame, type, eventpoint
-
-        def get_audio_out(self):
-            return self.output_queue.get()
-
-        def warm_up(self):
-            for _ in range(self.stride_left_size + self.stride_right_size):
-                audio_frame, type, eventpoint = self.get_audio_frame()
-                self.frames.append(audio_frame)
-                self.output_queue.put((audio_frame, type, eventpoint))
-            for _ in range(self.stride_left_size):
-                self.output_queue.get()
-
-        def run_step(self):
+        except Exception:
             pass
 
-        def get_next_feat(self, block, timeout):
-            return self.feat_queue.get(block, timeout)
+    def put_audio_frame(self, audio_chunk, datainfo: dict):
+        self.queue.put((audio_chunk, datainfo))
+
+    def get_audio_frame(self):
+        import queue
+
+        import numpy as np
+
+        try:
+            frame, eventpoint = self.queue.get(block=True, timeout=0.025)
+            type = 0
+        except queue.Empty:
+            if self.parent and getattr(self.parent, 'curr_state', 0) > 1:
+                frame = self.parent.get_audio_stream(self.parent.curr_state)
+                type = self.parent.curr_state
+            else:
+                frame = np.zeros(self.chunk, dtype=np.float32)
+                type = 1
+            eventpoint = None
+        return frame, type, eventpoint
+
+    def get_audio_out(self):
+        return self.output_queue.get()
+
+    def warm_up(self):
+        for _ in range(self.stride_left_size + self.stride_right_size):
+            audio_frame, type, eventpoint = self.get_audio_frame()
+            self.frames.append(audio_frame)
+            self.output_queue.put((audio_frame, type, eventpoint))
+        for _ in range(self.stride_left_size):
+            self.output_queue.get()
+
+    def run_step(self):
+        pass
+
+    def get_next_feat(self, block, timeout):
+        return self.feat_queue.get(block, timeout)
 
     class MockLogger:
         def debug(
@@ -295,6 +306,7 @@ class TencentApiAsr(BaseASR):
         try:
             import io
             import wave
+
             import numpy as _np
 
             # Ensure numpy array
@@ -318,7 +330,8 @@ class TencentApiAsr(BaseASR):
 
             return buf.getvalue()
         except Exception as e:
-            logger.warning(f"[ASR] Fast PCM->WAV conversion failed: {e}; falling back to sending raw bytes")
+            logger.warning(
+                f"[ASR] Fast PCM->WAV conversion failed: {e}; falling back to sending raw bytes")
             return audio_array
 
     async def recognize(self, audio_data: bytes) -> str:
@@ -334,13 +347,18 @@ class TencentApiAsr(BaseASR):
         Raises:
             RuntimeError: If recognition fails or credentials are invalid
         """
-        # Convert audio to base64
+        # Convert input into WAV bytes and base64-encode
         try:
-            # Convert audio format if needed
-            audio_bytes = self._convert_audio_format(audio_data)
+            # Fast path: if caller passed raw PCM numpy array or list/tuple, convert directly
+            import numpy as _np
+            if hasattr(audio_data, 'dtype') or isinstance(audio_data, (list, tuple)):
+                wav_bytes = self._pcm_to_wav_bytes(
+                    _np.array(audio_data, dtype=_np.float32), 16000)
+            else:
+                # Otherwise use existing converter which handles mp3/wav/raw bytes
+                wav_bytes = self._convert_audio_format(audio_data)
 
-            # Base64 encode
-            audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+            audio_base64 = base64.b64encode(wav_bytes).decode("utf-8")
         except Exception as e:
             logger.error(
                 f"[ASR] Failed to encode audio data: {e}", exc_info=True)
@@ -352,91 +370,98 @@ class TencentApiAsr(BaseASR):
         # Send request
         try:
             import httpx
-            # 减小网络超时以提升前端响应感知（可从环境/配置调整）
+
+            max_retries = int(os.getenv('TENCENT_ASR_RETRIES', '2'))
+            backoff_base = float(os.getenv('TENCENT_ASR_BACKOFF', '0.5'))
+            response = None
+            last_exc = None
             async with httpx.AsyncClient() as client:
-                response = await client.post(self._url, headers=headers, data=payload, timeout=10.0)
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        response = await client.post(self._url, headers=headers, data=payload, timeout=10.0)
+                        # Treat 5xx as transient and retryable
+                        if response.status_code >= 500:
+                            last_exc = RuntimeError(
+                                f"Server error: {response.status_code}")
+                            raise httpx.RequestError(str(last_exc))
+                        break
+                    except (httpx.RequestError, httpx.TimeoutException) as e:
+                        last_exc = e
+                        logger.warning(
+                            f"[ASR] Tencent request attempt {attempt}/{max_retries} failed: {e}")
+                        if attempt == max_retries:
+                            raise
+                        await asyncio.sleep(backoff_base * (2 ** (attempt - 1)))
 
-                logger.debug(
-                    f"[ASR] Tencent API response status: {response.status_code}")
+            logger.debug(
+                f"[ASR] Tencent API response status: {response.status_code}")
 
-                if response.status_code != 200:
-                    logger.error(
-                        f"[ASR] Tencent ASR API error: {response.status_code}, response: {response.text}")
+            if response.status_code != 200:
+                logger.error(
+                    f"[ASR] Tencent ASR API error: {response.status_code}, response: {response.text}")
+                raise RuntimeError(
+                    f"Tencent ASR API error: {response.status_code}, response: {response.text}")
+
+            result = response.json()
+            logger.debug(
+                f"[ASR] Tencent API response keys: {list(result.keys())}")
+
+            if "Response" not in result:
+                logger.error(
+                    f"[ASR] Unexpected Tencent API response format: {result}")
+                raise RuntimeError(
+                    f"Unexpected Tencent API response format: {result}")
+
+            response_body = result["Response"]
+
+            # Check for errors
+            if "Error" in response_body:
+                error_msg = response_body['Error']['Message']
+                error_code = response_body['Error']['Code']
+                logger.error(
+                    f"[ASR] Tencent ASR error - Code: {error_code}, Message: {error_msg}")
+
+                if error_code == "AuthFailure.SecretIdNotFound":
                     raise RuntimeError(
-                        f"Tencent ASR API error: {response.status_code}, response: {response.text}")
-
-                result = response.json()
-                logger.debug(
-                    f"[ASR] Tencent API response keys: {list(result.keys())}")
-
-                if "Response" not in result:
-                    logger.error(
-                        f"[ASR] Unexpected Tencent API response format: {result}")
+                        f"Tencent ASR authentication failed: SecretId not found. Please check that your TENCENT_ASR_SECRET_ID is correct. Error: {error_msg}")
+                elif error_code == "AuthFailure.SignatureFailure":
                     raise RuntimeError(
-                        f"Unexpected Tencent API response format: {result}")
-
-                response_body = result["Response"]
-
-                # Check for errors
-                if "Error" in response_body:
-                    error_msg = response_body['Error']['Message']
-                    error_code = response_body['Error']['Code']
-                    logger.error(
-                        f"[ASR] Tencent ASR error - Code: {error_code}, Message: {error_msg}")
-
-                    # Provide specific guidance based on error code
-                    if error_code == "AuthFailure.SecretIdNotFound":
-                        raise RuntimeError(
-                            f"Tencent ASR authentication failed: SecretId not found. "
-                            f"Please check that your TENCENT_ASR_SECRET_ID is correct. Error: {error_msg}"
-                        )
-                    elif error_code == "AuthFailure.SignatureFailure":
-                        raise RuntimeError(
-                            f"Tencent ASR authentication failed: Signature validation failed. "
-                            f"Please check that your TENCENT_ASR_SECRET_KEY is correct. Error: {error_msg}"
-                        )
-                    elif error_code == "InvalidParameterValue.ErrorInvalidVoicedata":
-                        raise RuntimeError(
-                            f"Tencent ASR audio format error: {error_msg}. "
-                            f"Ensure the audio is a PCM WAV (16kHz mono) or provide compatible audio."
-                        )
-                    else:
-                        raise RuntimeError(
-                            f"Tencent ASR API error - Code: {error_code}, Message: {error_msg}")
-
-                # Extract transcript
-                transcript = None
-                if isinstance(response_body.get("Result"), str) and response_body.get("Result"):
-                    transcript = response_body.get("Result")
-
-                # Try alternative keys
-                if not transcript:
-                    for alt_key in ("Text", "Transcript", "TextResult"):
-                        if isinstance(response_body.get(alt_key), str) and response_body.get(alt_key):
-                            transcript = response_body.get(alt_key)
-                            break
-
-                # Handle async response
-                if not transcript:
-                    if "TaskId" in response_body:
-                        task_id = response_body.get("TaskId")
-                        logger.error(
-                            f"[ASR] Tencent returned TaskId for async job: {task_id}. Full response: {response_body}")
-                        raise RuntimeError(
-                            f"Tencent ASR returned an async TaskId (TaskId={task_id}). "
-                            f"This API path expects synchronous results. Consider using smaller audio."
-                        )
-
-                    # No transcript available
-                    logger.error(
-                        f"[ASR] Tencent API response missing transcript keys, response keys: {list(response_body.keys())}")
+                        f"Tencent ASR authentication failed: Signature validation failed. Please check that your TENCENT_ASR_SECRET_KEY is correct. Error: {error_msg}")
+                elif error_code == "InvalidParameterValue.ErrorInvalidVoicedata":
                     raise RuntimeError(
-                        f"Tencent API response missing expected transcript field. "
-                        f"Response keys: {list(response_body.keys())}"
-                    )
+                        f"Tencent ASR audio format error: {error_msg}. Ensure the audio is a PCM WAV (16kHz mono) or provide compatible audio.")
+                else:
+                    raise RuntimeError(
+                        f"Tencent ASR API error - Code: {error_code}, Message: {error_msg}")
 
-                logger.debug(f"[ASR] Tencent ASR recognized: {transcript}")
-                return transcript
+            # Extract transcript
+            transcript = None
+            if isinstance(response_body.get("Result"), str) and response_body.get("Result"):
+                transcript = response_body.get("Result")
+
+            # Try alternative keys
+            if not transcript:
+                for alt_key in ("Text", "Transcript", "TextResult"):
+                    if isinstance(response_body.get(alt_key), str) and response_body.get(alt_key):
+                        transcript = response_body.get(alt_key)
+                        break
+
+            # Handle async response
+            if not transcript:
+                if "TaskId" in response_body:
+                    task_id = response_body.get("TaskId")
+                    logger.error(
+                        f"[ASR] Tencent returned TaskId for async job: {task_id}. Full response: {response_body}")
+                    raise RuntimeError(
+                        f"Tencent ASR returned an async TaskId (TaskId={task_id}). This API path expects synchronous results. Consider using smaller audio.")
+
+                logger.error(
+                    f"[ASR] Tencent API response missing transcript keys, response keys: {list(response_body.keys())}")
+                raise RuntimeError(
+                    f"Tencent API response missing expected transcript field. Response keys: {list(response_body.keys())}")
+
+            logger.debug(f"[ASR] Tencent ASR recognized: {transcript}")
+            return transcript
 
         except Exception as e:
             logger.error(
@@ -579,17 +604,31 @@ class TencentApiAsrLegacy:
         else:
             audio_data = input_data
 
-        # Convert to base64 if needed
-        if isinstance(audio_data, bytes):
-            # Convert audio format if needed
-            audio_bytes = self._convert_audio_format(audio_data)
-            audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
-        elif isinstance(audio_data, str):
-            # Assume it's already base64
-            audio_base64 = audio_data
-        else:
-            raise RuntimeError(
-                f"Unsupported input data type: {type(audio_data)}")
+        # Fast path: accept numpy arrays or lists and convert to WAV bytes
+        try:
+            import numpy as _np
+            if hasattr(audio_data, 'dtype') or isinstance(audio_data, (list, tuple)):
+                wav_bytes = self._convert_audio_format(self._pcm_to_wav_bytes(
+                    _np.array(audio_data, dtype=_np.float32), 16000))
+                audio_base64 = base64.b64encode(wav_bytes).decode("utf-8")
+            elif isinstance(audio_data, bytes):
+                audio_bytes = self._convert_audio_format(audio_data)
+                audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+            elif isinstance(audio_data, str):
+                # Assume it's already base64
+                audio_base64 = audio_data
+            else:
+                raise RuntimeError(
+                    f"Unsupported input data type: {type(audio_data)}")
+        except Exception:
+            # Fallback to previous behavior
+            if isinstance(audio_data, bytes):
+                audio_bytes = self._convert_audio_format(audio_data)
+                audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+            elif isinstance(audio_data, str):
+                audio_base64 = audio_data
+            else:
+                raise
 
         # Build and send request
         headers, payload = self._build_request(audio_base64)

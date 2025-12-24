@@ -609,7 +609,7 @@ class BaseReal:
                             except Exception:
                                 pass
                             logger.debug(
-                                f"[PROCESS_FRAMES] Video queue full, dropping frame (total_dropped={getattr(self,'_video_drop_count',0)})")
+                                f"[PROCESS_FRAMES] Video queue full, dropping frame (total_dropped={getattr(self, '_video_drop_count', 0)})")
                     else:
                         logger.debug(
                             f"[PROCESS_FRAMES] Video track or queue is None!")

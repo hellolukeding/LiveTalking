@@ -9,7 +9,8 @@ formatter = logging.Formatter(
 # 文件处理器
 fhandler = logging.FileHandler('livetalking.log')
 fhandler.setFormatter(formatter)
-fhandler.setLevel(logging.INFO)
+# Only persist warnings and errors to the file to reduce noisy INFO traffic
+fhandler.setLevel(logging.WARNING)
 logger.addHandler(fhandler)
 
 # 控制台处理器

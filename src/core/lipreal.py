@@ -122,7 +122,7 @@ def __mirror_index(size, index):
         return size - res - 1
 
 
-def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_out_queue, res_frame_queue, model):
+def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_out_queue, res_frame_queue, model, owner=None):
 
     # model = load_model("./models/wav2lip.pth")
     # input_face_list = glob.glob(os.path.join(face_imgs_path, '*.[jpJP][pnPN]*[gG]'))
@@ -153,9 +153,24 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
 
         if is_all_silence:
             for i in range(batch_size):
-                res_frame_queue.put((None, __mirror_index(
-                    length, index), audio_frames[i*2:i*2+2]))
+                item = (None, __mirror_index(length, index), audio_frames[i*2:i*2+2])
+                try:
+                    res_frame_queue.put_nowait(item)
+                except queue.Full:
+                    # 队列已满：尝试丢弃最旧一帧再插入，避免推理线程阻塞
+                    try:
+                        _ = res_frame_queue.get_nowait()
+                    except Exception:
+                        pass
+                    try:
+                        res_frame_queue.put_nowait(item)
+                    except queue.Full:
+                        if owner is not None:
+                            owner.res_drop_count += 1
+                        logger.warning(f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner,'res_drop_count',0)}")
                 index = index + 1
+            batch_time = time.perf_counter() - starttime
+            logger.debug(f"[LIPREAL] produced {batch_size} silence frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
         else:
             # print('infer=======')
             t = time.perf_counter()
@@ -191,10 +206,24 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                 count = 0
                 counttime = 0
             for i, res_frame in enumerate(pred):
-                # self.__pushmedia(res_frame,loop,audio_track,video_track)
-                res_frame_queue.put((res_frame, __mirror_index(
-                    length, index), audio_frames[i*2:i*2+2]))
+                item = (res_frame, __mirror_index(length, index), audio_frames[i*2:i*2+2])
+                try:
+                    res_frame_queue.put_nowait(item)
+                except queue.Full:
+                    # 丢弃最旧帧并尝试再次插入
+                    try:
+                        _ = res_frame_queue.get_nowait()
+                    except Exception:
+                        pass
+                    try:
+                        res_frame_queue.put_nowait(item)
+                    except queue.Full:
+                        if owner is not None:
+                            owner.res_drop_count += 1
+                        logger.warning(f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner,'res_drop_count',0)}")
                 index = index + 1
+            batch_time = time.perf_counter() - starttime
+            logger.debug(f"[LIPREAL] produced {len(pred)} frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
             # print('total batch time:',time.perf_counter()-starttime)
     logger.debug('lipreal inference processor stop')
 
@@ -211,7 +240,14 @@ class LipReal(BaseReal):
 
         self.batch_size = opt.batch_size
         self.idx = 0
-        self.res_frame_queue = Queue(self.batch_size*2)  # mp.Queue
+        # Increase buffer to reduce blocking from occasional inference spikes
+        # 扩容以减少短时峰值导致的阻塞；在队列满时丢弃最旧帧以保持推理线程不中断
+        self.res_frame_queue = Queue(self.batch_size*8)  # mp.Queue
+        self.res_drop_count = 0
+        # 周期性指标上报线程（每10s输出一次可观测指标）
+        self._metrics_running = True
+        self._metrics_thread = Thread(target=self._metrics_logger, daemon=True)
+        self._metrics_thread.start()
         # self.__loadavatar()
         self.model = model
         self.frame_list_cycle, self.face_list_cycle, self.coord_list_cycle = avatar
@@ -251,7 +287,16 @@ class LipReal(BaseReal):
         """
         try:
             logger.debug("[Tencent ASR] Starting recognition...")
-            text = await self.tencent_asr.recognize(audio_data)
+
+            # 如果传入的是 numpy 数组或列表，使用后台线程快速转换为 WAV，避免在渲染主循环中阻塞
+            import numpy as _np
+            if hasattr(audio_data, 'dtype') or isinstance(audio_data, (list, tuple)):
+                loop = asyncio.get_running_loop()
+                wav_bytes = await loop.run_in_executor(None, self.tencent_asr._pcm_to_wav_bytes, _np.array(audio_data, dtype=_np.float32), 16000)
+            else:
+                wav_bytes = audio_data
+
+            text = await self.tencent_asr.recognize(wav_bytes)
             logger.debug(f"[Tencent ASR] Recognized: {text}")
 
             # 将识别结果发送到数据通道或进行其他处理
@@ -263,34 +308,24 @@ class LipReal(BaseReal):
             logger.error(f"[Tencent ASR] Error: {e}")
             return None
 
-    def _collect_audio_data(self, duration_ms: int = 2000) -> bytes:
+    def _collect_audio_data(self, duration_ms: int = 2000):
         """
         收集指定时长的音频数据用于腾讯ASR
         Args:
             duration_ms: 收集的音频时长（毫秒）
         Returns:
-            bytes: 音频数据
+            numpy.ndarray: 单通道 float32 PCM 数组（采样率 16k），可能为空数组
         """
-        import io
-
-        import soundfile as sf
-
-        # 优先使用WebRTC音频缓冲区
+        # 优先使用 WebRTC 音频缓冲区（内部为 float32 列表）
         with self.asr_buffer_lock:
             if len(self.asr_audio_buffer) > 0:
-                # 从缓冲区收集音频
                 samples_needed = int(16000 * duration_ms / 1000)
-                audio_data = np.array(
-                    self.asr_audio_buffer[:samples_needed], dtype=np.float32)
+                audio_data = np.array(self.asr_audio_buffer[:samples_needed], dtype=np.float32)
                 self.asr_audio_buffer = self.asr_audio_buffer[samples_needed:]
+                return audio_data
 
-                # 转换为WAV格式
-                buffer = io.BytesIO()
-                sf.write(buffer, audio_data, 16000, format='WAV')
-                return buffer.getvalue()
-
-        # 如果缓冲区为空，从LipASR输出队列收集
-        frames_needed = int(duration_ms / 20)  # 每帧20ms
+        # 如果缓冲区为空，从 LipASR 输出队列收集若干帧（每帧约20ms）
+        frames_needed = int(duration_ms / 20)
         audio_frames = []
 
         for _ in range(frames_needed):
@@ -302,15 +337,10 @@ class LipReal(BaseReal):
                 break
 
         if not audio_frames:
-            return b""
+            return np.array([], dtype=np.float32)
 
-        # 合并音频帧
         audio_data = np.concatenate(audio_frames)
-
-        # 转换为WAV格式
-        buffer = io.BytesIO()
-        sf.write(buffer, audio_data, 16000, format='WAV')
-        return buffer.getvalue()
+        return audio_data
 
     def add_asr_audio(self, audio_frame: np.ndarray):
         """
@@ -324,6 +354,17 @@ class LipReal(BaseReal):
             max_buffer_size = 16000 * 10
             if len(self.asr_audio_buffer) > max_buffer_size:
                 self.asr_audio_buffer = self.asr_audio_buffer[-max_buffer_size:]
+
+    def _metrics_logger(self):
+        """周期性输出关键运行指标，便于长期观察压力点（每10s）"""
+        while getattr(self, '_metrics_running', False):
+            try:
+                video_drops = getattr(self, '_video_drop_count', 0)
+                res_qsize = self.res_frame_queue.qsize() if hasattr(self, 'res_frame_queue') else -1
+                logger.info(f"[METRICS] res_drop_count={getattr(self,'res_drop_count',0)} video_drop={video_drops} res_qsize={res_qsize}")
+            except Exception:
+                pass
+            time.sleep(10)
 
     def render(self, quit_event, loop=None, audio_track=None, video_track=None):
         # 保存音频轨道引用到父类
@@ -345,8 +386,8 @@ class LipReal(BaseReal):
 
         infer_quit_event = Event()
         infer_thread = Thread(target=inference, args=(infer_quit_event, self.batch_size, self.face_list_cycle,
-                                                      self.lip_asr.feat_queue, self.lip_asr.output_queue, self.res_frame_queue,
-                                                      self.model,))  # mp.Process
+                                  self.lip_asr.feat_queue, self.lip_asr.output_queue, self.res_frame_queue,
+                                  self.model, self))  # mp.Process
         infer_thread.start()
 
         process_quit_event = Event()
@@ -362,7 +403,8 @@ class LipReal(BaseReal):
 
         # 腾讯ASR相关变量
         asr_count = 0
-        asr_interval = 50  # 每50帧运行一次腾讯ASR（约1秒）
+        # 将触发间隔降一半以更快响应（25 帧 ≈ 0.5s），实际触发频率可调
+        asr_interval = 25
 
         while not quit_event.is_set():
             # update texture every frame
@@ -377,7 +419,8 @@ class LipReal(BaseReal):
                 asr_count = 0
                 # 收集音频数据并运行腾讯ASR
                 try:
-                    audio_data = self._collect_audio_data(2000)  # 收集2秒音频
+                    # 收集1秒音频作为单次识别单元，避免过长导致异步任务/延迟
+                    audio_data = self._collect_audio_data(1000)
                     if len(audio_data) > 1000:  # 确保有足够的音频数据
                         if loop and loop.is_running():
                             asyncio.create_task(
@@ -407,3 +450,13 @@ class LipReal(BaseReal):
 
         process_quit_event.set()
         process_thread.join()
+        # 停止并等待指标线程退出
+        try:
+            self._metrics_running = False
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_metrics_thread') and self._metrics_thread is not None:
+                self._metrics_thread.join(timeout=1.0)
+        except Exception:
+            pass

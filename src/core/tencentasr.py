@@ -287,6 +287,40 @@ class TencentApiAsr(BaseASR):
                 "[ASR] Unknown audio format detected; Tencent ASR may reject the audio")
             return audio_bytes
 
+    def _pcm_to_wav_bytes(self, audio_array, sample_rate: int = 16000) -> bytes:
+        """
+        Fast helper: convert 1-D numpy array of float32 or int16 PCM samples to WAV bytes (16kHz mono).
+        This avoids expensive pydub/soundfile conversions when we already have raw PCM samples.
+        """
+        try:
+            import io
+            import wave
+            import numpy as _np
+
+            # Ensure numpy array
+            if not hasattr(audio_array, 'dtype'):
+                # fallback: assume bytes already
+                return audio_array
+
+            arr = audio_array
+            # If float, convert to int16
+            if _np.issubdtype(arr.dtype, _np.floating):
+                int16 = _np.clip(arr * 32767, -32768, 32767).astype(_np.int16)
+            else:
+                int16 = arr.astype(_np.int16)
+
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(int16.tobytes())
+
+            return buf.getvalue()
+        except Exception as e:
+            logger.warning(f"[ASR] Fast PCM->WAV conversion failed: {e}; falling back to sending raw bytes")
+            return audio_array
+
     async def recognize(self, audio_data: bytes) -> str:
         """
         Recognize speech from audio data
@@ -318,8 +352,9 @@ class TencentApiAsr(BaseASR):
         # Send request
         try:
             import httpx
+            # 减小网络超时以提升前端响应感知（可从环境/配置调整）
             async with httpx.AsyncClient() as client:
-                response = await client.post(self._url, headers=headers, data=payload, timeout=30.0)
+                response = await client.post(self._url, headers=headers, data=payload, timeout=10.0)
 
                 logger.debug(
                     f"[ASR] Tencent API response status: {response.status_code}")
@@ -562,7 +597,7 @@ class TencentApiAsrLegacy:
         try:
             import httpx
             async with httpx.AsyncClient() as client:
-                response = await client.post(self._url, headers=headers, data=payload, timeout=30.0)
+                response = await client.post(self._url, headers=headers, data=payload, timeout=10.0)
 
                 if response.status_code != 200:
                     raise RuntimeError(

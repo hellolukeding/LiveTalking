@@ -26,7 +26,6 @@ from aiortc import MediaStreamTrack
 from av import AudioFrame, VideoFrame
 from av.frame import Frame
 from av.packet import Packet
-
 from logger import logger as mylogger
 
 AUDIO_PTIME = 0.020  # 20ms audio packetization
@@ -54,7 +53,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         self._last_frame = None
         self._start = None
         self._timestamp = 0
-        
+
         if self.kind == 'video':
             self.framecount = 0
             self.lasttime = time.perf_counter()
@@ -71,7 +70,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         except asyncio.TimeoutError:
             if self.readyState != "live":
                 raise Exception("Track stopped")
-            
+
             if self.kind == 'audio':
                 # Determine expected samples and sample_rate from player/container
                 try:
@@ -81,7 +80,8 @@ class PlayerStreamTrack(MediaStreamTrack):
                     expected_samples = int(SAMPLE_RATE * AUDIO_PTIME)
 
                 audio = np.zeros((1, expected_samples), dtype=np.int16)
-                frame = AudioFrame.from_ndarray(audio, layout='mono', format='s16')
+                frame = AudioFrame.from_ndarray(
+                    audio, layout='mono', format='s16')
                 frame.sample_rate = sr
             else:
                 if self._last_frame is not None:
@@ -116,7 +116,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             if self._start is None:
                 self._start = time.time()
                 self._timestamp = 0
-                mylogger.info(f'[AUDIO] Track started')
+                mylogger.debug(f'[AUDIO] Track started')
 
             frame.pts = self._timestamp
             frame.time_base = fractions.Fraction(1, frame.sample_rate)
@@ -126,14 +126,15 @@ class PlayerStreamTrack(MediaStreamTrack):
             if self._start is None:
                 self._start = time.time()
                 self._timestamp = 0
-                mylogger.info(f'[VIDEO] Track started')
+                mylogger.debug(f'[VIDEO] Track started')
 
             frame.pts = self._timestamp
             frame.time_base = VIDEO_TIME_BASE
             self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
 
             # 视频按帧率控制
-            frame_count = self._timestamp // int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+            frame_count = self._timestamp // int(
+                VIDEO_PTIME * VIDEO_CLOCK_RATE)
             expected_time = self._start + frame_count * VIDEO_PTIME
             wait_time = expected_time - time.time()
             if wait_time > 0:
@@ -147,7 +148,8 @@ class PlayerStreamTrack(MediaStreamTrack):
             self.framecount += 1
             self.lasttime = time.perf_counter()
             if self.framecount == 100:
-                mylogger.info(f"Video FPS: {self.framecount/self.totaltime:.2f}")
+                mylogger.info(
+                    f"Video FPS: {self.framecount/self.totaltime:.2f}")
                 self.framecount = 0
                 self.totaltime = 0
 
@@ -202,8 +204,10 @@ class HumanPlayer:
         return self.__video
 
     def _start(self, track: PlayerStreamTrack) -> None:
-        self.__started.add(track)
-        mylogger.info(f"[HumanPlayer] Track started: {track.kind}")
+        # 仅当 track 首次加入时记录，避免每次 recv 调用都输出日志
+        if track not in self.__started:
+            self.__started.add(track)
+            mylogger.debug(f"[HumanPlayer] Track started: {track.kind}")
 
         if self.__thread is None:
             self.__thread_quit = asyncio.Event() if False else __import__('threading').Event()
@@ -219,11 +223,13 @@ class HumanPlayer:
                 ),
             )
             self.__thread.start()
-            mylogger.info("[HumanPlayer] Worker thread started")
+            mylogger.debug("[HumanPlayer] Worker thread started")
 
     def _stop(self, track: PlayerStreamTrack) -> None:
-        self.__started.discard(track)
-        mylogger.info(f"[HumanPlayer] Track stopped: {track.kind}")
+        # 仅当 track 实际存在于集合中时记录停止日志
+        if track in self.__started:
+            self.__started.discard(track)
+            mylogger.debug(f"[HumanPlayer] Track stopped: {track.kind}")
 
         if not self.__started and self.__thread is not None:
             self.__thread_quit.set()

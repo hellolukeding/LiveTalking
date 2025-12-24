@@ -10,15 +10,16 @@ This script:
 Run:
 python3 scripts/tts_sim_test.py
 """
+from src.core.basereal import BaseReal
 import os
+# ensure project root in PYTHONPATH when running from repo root
+import sys
+
 import numpy as np
 import soundfile as sf
 
-# ensure project root in PYTHONPATH when running from repo root
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.core.basereal import BaseReal
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..')))
 
 
 class DummyOpt:
@@ -52,7 +53,8 @@ def main():
         filebytes = f.read()
     try:
         base.put_audio_file(filebytes, {'test': True})
-        print('put_audio_file executed, pending frames:', len(base._pending_audio))
+        print('put_audio_file executed, pending frames:',
+              len(base._pending_audio))
     except Exception as e:
         print('Error calling put_audio_file:', e)
 

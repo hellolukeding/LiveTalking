@@ -34,9 +34,8 @@ import resampy
 import soundfile as sf
 import torch
 from av import AudioFrame, VideoFrame
-from tqdm import tqdm
-
 from logger import logger
+from tqdm import tqdm
 from ttsreal import (XTTS, AzureTTS, CosyVoiceTTS, DoubaoTTS, EdgeTTS, FishTTS,
                      IndexTTS2, SovitsTTS, TencentTTS)
 
@@ -116,6 +115,9 @@ class BaseReal:
         self.loop = None
         self.audio_track = None  # WebRTC 音频轨道引用
 
+        # Runtime metrics
+        self._video_drop_count = 0
+
         # Pending audio frames queued when audio_track or its event loop is not ready
         # Use a thread-safe list to buffer frames and flush later when possible
         import threading
@@ -158,7 +160,8 @@ class BaseReal:
                 return
 
             # 简单直接的转换
-            frame = np.clip(audio_chunk * 32767, -32768, 32767).astype(np.int16)
+            frame = np.clip(audio_chunk * 32767, -32768,
+                            32767).astype(np.int16)
 
             # Use configured chunk/sample size instead of hard-coded 320
             expected_samples = getattr(self, 'chunk', 320)
@@ -170,7 +173,8 @@ class BaseReal:
                 frame = frame[:expected_samples]
 
             frame_2d = frame.reshape(1, -1)
-            new_frame = AudioFrame.from_ndarray(frame_2d, layout='mono', format='s16')
+            new_frame = AudioFrame.from_ndarray(
+                frame_2d, layout='mono', format='s16')
             new_frame.sample_rate = getattr(self, 'sample_rate', 16000)
 
             if not (hasattr(self, 'audio_track') and self.audio_track):
@@ -600,7 +604,12 @@ class BaseReal:
                                 video_track._queue.put_nowait, (new_frame, None))
                         except Exception as queue_err:
                             # 队列满时丢弃帧，避免阻塞
-                            logger.debug(f"[PROCESS_FRAMES] Video queue full, dropping frame")
+                            try:
+                                self._video_drop_count += 1
+                            except Exception:
+                                pass
+                            logger.debug(
+                                f"[PROCESS_FRAMES] Video queue full, dropping frame (total_dropped={getattr(self,'_video_drop_count',0)})")
                     else:
                         logger.debug(
                             f"[PROCESS_FRAMES] Video track or queue is None!")

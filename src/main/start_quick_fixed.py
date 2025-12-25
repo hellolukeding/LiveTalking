@@ -178,13 +178,17 @@ def main():
     print(f"  端口: {opt.listenport}")
     print()
 
-    # 确认继续
+    # 确认继续（在容器/非交互环境中自动继续，或设置 NO_PROMPT=1 跳过问询）
     print("⚠️  注意: 此模式跳过健康检查，使用推荐配置")
     print()
-    response = input("是否继续? (y/n): ")
-    if response.lower() != 'y':
-        print("已取消")
-        return
+    need_prompt = sys.stdin.isatty() and os.getenv("NO_PROMPT", "0") != "1"
+    if need_prompt:
+        response = input("是否继续? (y/n): ")
+        if response.lower() != 'y':
+            print("已取消")
+            return
+    else:
+        print("非交互模式或 NO_PROMPT=1，自动继续")
 
     print()
 

@@ -124,7 +124,7 @@ class EdgeTTS(BaseTTS):
 
         self.input_stream.seek(0)
         stream = self.__create_bytes_stream(self.input_stream)
-        
+
         streamlen = stream.shape[0]
         idx = 0
         while streamlen >= self.chunk and self.state == State.RUNNING:
@@ -140,7 +140,7 @@ class EdgeTTS(BaseTTS):
             # 按实时节奏发送
             time.sleep(self.chunk / self.sample_rate)
             idx += self.chunk
-        
+
         self.input_stream.seek(0)
         self.input_stream.truncate()
 
@@ -615,12 +615,14 @@ class DoubaoTTS(BaseTTS):
     def __init__(self, opt, parent):
         super().__init__(opt, parent)
         self.appid = os.getenv("DOUBAO_APPID")
-        self.access_key = os.getenv("DOUBAO_ACCESS_TOKEN") or os.getenv("DOUBAO_AccessKeyID") or os.getenv("DOUBAO_TOKEN")
+        self.access_key = os.getenv("DOUBAO_ACCESS_TOKEN") or os.getenv(
+            "DOUBAO_AccessKeyID") or os.getenv("DOUBAO_TOKEN")
         self.voice_id = os.getenv("DOUBAO_VOICE_ID") or opt.REF_FILE
         self.resource_id = os.getenv("DOUBAO_RESOURCE_ID")
         self.cluster = "volcano_tts"
-        
-        logger.info(f"[DOUBAO_TTS] 初始化: appid={self.appid}, voice_id={self.voice_id}")
+
+        logger.info(
+            f"[DOUBAO_TTS] 初始化: appid={self.appid}, voice_id={self.voice_id}")
 
         # WebSocket连接池 - 直接使用16kHz
         self.connection_pool = DoubaoConnectionPool(
@@ -641,10 +643,10 @@ class DoubaoTTS(BaseTTS):
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
-        
+
         if not text.strip():
             return
-            
+
         logger.info(f"[DOUBAO_TTS] 处理: {text[:50]}...")
 
         with self._processing_lock:
@@ -679,23 +681,24 @@ class DoubaoTTS(BaseTTS):
                             new_samples = np.frombuffer(
                                 result[:aligned_len], dtype=np.int16
                             ).astype(np.float32) / 32767.0
-                            audio_buffer = np.concatenate([audio_buffer, new_samples])
-                        
+                            audio_buffer = np.concatenate(
+                                [audio_buffer, new_samples])
+
                         # 发送完整的chunk
                         while len(audio_buffer) >= chunk_size and self.state == State.RUNNING:
                             chunk = audio_buffer[:chunk_size].copy()
                             audio_buffer = audio_buffer[chunk_size:]
-                            
+
                             eventpoint = {}
                             if first_chunk:
                                 eventpoint = {'status': 'start', 'text': text}
                                 eventpoint.update(textevent)
                                 first_chunk = False
                                 start_time = time.perf_counter()
-                            
+
                             self.parent.put_audio_frame(chunk, eventpoint)
                             total_sent += 1
-                            
+
                             # 实时节奏控制
                             if start_time:
                                 expected_time = start_time + total_sent * 0.020
@@ -704,14 +707,14 @@ class DoubaoTTS(BaseTTS):
                                     time.sleep(sleep_time)
 
                 self.connection_pool.return_connection(conn)
-                
+
                 # 发送剩余数据
                 if len(audio_buffer) > 0 and self.state == State.RUNNING:
                     if len(audio_buffer) < chunk_size:
                         padded = np.zeros(chunk_size, dtype=np.float32)
                         padded[:len(audio_buffer)] = audio_buffer
                         audio_buffer = padded
-                    
+
                     chunk = audio_buffer[:chunk_size]
                     eventpoint = {'status': 'end', 'text': text}
                     if first_chunk:
@@ -720,8 +723,9 @@ class DoubaoTTS(BaseTTS):
                     total_sent += 1
                 elif total_sent > 0:
                     eventpoint = {'status': 'end', 'text': text}
-                    self.parent.put_audio_frame(np.zeros(chunk_size, dtype=np.float32), eventpoint)
-                
+                    self.parent.put_audio_frame(
+                        np.zeros(chunk_size, dtype=np.float32), eventpoint)
+
                 logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个chunk")
 
             except Exception as e:
@@ -746,7 +750,7 @@ class DoubaoTTS(BaseTTS):
 # WebSocket连接管理类
 class DoubaoWebSocketConnection:
     """单个WebSocket连接包装器 - 基于火山引擎v3 API
-    
+
     协议格式参考: https://www.volcengine.com/docs/6561/1719100
     """
 
@@ -780,11 +784,12 @@ class DoubaoWebSocketConnection:
         try:
             # v3 API端点
             api_url = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
-            
+
             # 获取实际使用的 resource_id
             actual_resource_id = self._get_resource_id()
-            logger.info(f"[WS_MANAGER] 使用 resource_id: {actual_resource_id}, voice_id: {self.voice_id}")
-            
+            logger.info(
+                f"[WS_MANAGER] 使用 resource_id: {actual_resource_id}, voice_id: {self.voice_id}")
+
             # v3 API使用HTTP Headers认证
             header = [
                 f"X-Api-App-Key: {self.appid}",
@@ -792,10 +797,10 @@ class DoubaoWebSocketConnection:
                 f"X-Api-Resource-Id: {actual_resource_id}",
                 f"X-Api-Connect-Id: {str(uuid.uuid4())}",
             ]
-            
+
             self.ws = websocket.create_connection(
-                api_url, 
-                timeout=10, 
+                api_url,
+                timeout=10,
                 header=header
             )
             self.is_connected = True
@@ -812,7 +817,7 @@ class DoubaoWebSocketConnection:
 
     def send_text_request(self, text: str, reqid: str, context_texts: list[str] = None) -> bool:
         """发送文本转语音请求 - 使用v3 API格式
-        
+
         Args:
             text: 要转换的文本
             reqid: 请求ID
@@ -839,7 +844,7 @@ class DoubaoWebSocketConnection:
                     "text": text,
                 },
             }
-            
+
             # 🆕 添加 context_texts 支持（情感/动作提示）
             if context_texts and len(context_texts) > 0:
                 if "additions" not in request_json["req_params"]:
@@ -850,11 +855,11 @@ class DoubaoWebSocketConnection:
             # v3 API二进制协议
             # Header: 1字节(版本+header_size) + 1字节(消息类型+flags) + 1字节(序列化+压缩) + 1字节(保留)
             header = bytearray(b'\x11\x10\x11\x00')
-            
+
             # Payload: gzip压缩的JSON
             payload_bytes = json.dumps(request_json).encode('utf-8')
             payload_bytes = gzip.compress(payload_bytes)
-            
+
             # 完整请求: header(4字节) + payload_size(4字节) + payload
             full_request = bytearray(header)
             full_request.extend(len(payload_bytes).to_bytes(4, 'big'))
@@ -878,7 +883,7 @@ class DoubaoWebSocketConnection:
 
     def receive_audio_chunk(self, timeout: float = 30.0):
         """接收音频数据块 - 解析v3 API响应
-        
+
         返回值:
         - bytes: 音频数据
         - b'': 继续接收（元数据或ACK）
@@ -891,7 +896,7 @@ class DoubaoWebSocketConnection:
         try:
             self.ws.settimeout(timeout)
             result = self.ws.recv()
-            
+
             with self.lock:
                 self.last_used = time.time()
 
@@ -904,8 +909,9 @@ class DoubaoWebSocketConnection:
             message_type = (result[1] >> 4) & 0x0f
             message_flags = result[1] & 0x0f
             compression = result[2] & 0x0f
-            
-            payload = result[header_size:] if len(result) > header_size else b''
+
+            payload = result[header_size:] if len(
+                result) > header_size else b''
 
             # 0xb = audio-only server response
             if message_type == 0xb:
@@ -914,34 +920,36 @@ class DoubaoWebSocketConnection:
                 else:
                     if len(payload) >= 8:
                         seq = int.from_bytes(payload[:4], "big", signed=True)
-                        
+
                         if seq < 0:
                             logger.debug("[WS_MANAGER] 收到音频结束标志 (seq < 0)")
                             return None  # 结束
-                        
+
                         # 🆕 修复：正确解析 payload 结构
                         # payload = seq(4) + request_id_len(4) + request_id(N) + audio_len(4) + audio_data
                         offset = 4  # 跳过 seq
-                        
+
                         if len(payload) < offset + 4:
                             return b''
-                        
-                        request_id_len = int.from_bytes(payload[offset:offset+4], "big")
+
+                        request_id_len = int.from_bytes(
+                            payload[offset:offset+4], "big")
                         offset += 4 + request_id_len  # 跳过 request_id_len 和 request_id
-                        
+
                         if len(payload) < offset + 4:
                             return b''
-                        
-                        audio_len = int.from_bytes(payload[offset:offset+4], "big")
+
+                        audio_len = int.from_bytes(
+                            payload[offset:offset+4], "big")
                         offset += 4  # 跳过 audio_len
-                        
+
                         audio_data = payload[offset:offset+audio_len]
-                        
+
                         if len(audio_data) > 0:
                             return audio_data
-                        
+
                     return b''
-            
+
             # 0x9 = full server response (元数据)
             elif message_type == 0x9:
                 try:
@@ -955,7 +963,7 @@ class DoubaoWebSocketConnection:
                 except Exception as e:
                     logger.warning(f"[WS_MANAGER] 解析元数据失败: {e}")
                 return b''  # 继续接收
-            
+
             # 0xf = error response
             elif message_type == 0xf:
                 try:
@@ -967,15 +975,28 @@ class DoubaoWebSocketConnection:
                         except:
                             pass
                         error_msg = msg_payload.decode('utf-8')
-                        logger.error(f"[WS_MANAGER] 错误 (code={error_code}): {error_msg}")
+                        logger.error(
+                            f"[WS_MANAGER] 错误 (code={error_code}): {error_msg}")
                 except Exception as e:
                     logger.error(f"[WS_MANAGER] 解析错误失败: {e}")
                 return None
-            
+
             return b''
 
         except websocket.WebSocketTimeoutException:
             logger.warning(f"[WS_MANAGER] 超时 ({timeout}s)")
+            return None
+        except websocket.WebSocketConnectionClosedException as e:
+            logger.error(f"[WS_MANAGER] WebSocket连接被远程关闭: {e}")
+            with self.lock:
+                self.error_count += 1
+                self.is_connected = False
+            return None
+        except ssl.SSLError as e:
+            logger.error(f"[WS_MANAGER] SSL错误: {e}")
+            with self.lock:
+                self.error_count += 1
+                self.is_connected = False
             return None
         except Exception as e:
             logger.error(f"[WS_MANAGER] 接收失败: {e}")
@@ -1007,7 +1028,7 @@ class DoubaoWebSocketConnection:
 
 class DoubaoConnectionPool:
     """WebSocket连接池管理器 - 预热连接版
-    
+
     火山引擎TTS的WebSocket连接是单次请求的，
     但我们可以预先建立连接等待使用，减少首次响应延迟。
     """
@@ -1031,10 +1052,12 @@ class DoubaoConnectionPool:
         self.cache_hits = 0
 
         # 启动预热线程
-        self._warmup_thread = threading.Thread(target=self._warmup_worker, daemon=True)
+        self._warmup_thread = threading.Thread(
+            target=self._warmup_worker, daemon=True)
         self._warmup_thread.start()
 
-        logger.info(f"[WS_POOL] 连接池初始化: sample_rate={sample_rate}, max_connections={max_connections}")
+        logger.info(
+            f"[WS_POOL] 连接池初始化: sample_rate={sample_rate}, max_connections={max_connections}")
 
     def _warmup_worker(self):
         """预热连接的后台线程"""
@@ -1046,7 +1069,8 @@ class DoubaoConnectionPool:
                     if conn:
                         try:
                             self._ready_connections.put(conn, timeout=1.0)
-                            logger.debug(f"[WS_POOL] 预热连接已就绪 (队列: {self._ready_connections.qsize()})")
+                            logger.debug(
+                                f"[WS_POOL] 预热连接已就绪 (队列: {self._ready_connections.qsize()})")
                         except:
                             conn.close()
                 time.sleep(0.5)  # 每0.5秒检查一次
@@ -1057,10 +1081,10 @@ class DoubaoConnectionPool:
     def _create_new_connection(self):
         """创建新连接"""
         conn = DoubaoWebSocketConnection(
-            self.appid, self.token, self.voice_id, 
+            self.appid, self.token, self.voice_id,
             self.resource_id, self.sample_rate
         )
-        
+
         if conn.connect():
             with self._lock:
                 self.total_connections += 1
@@ -1068,7 +1092,7 @@ class DoubaoConnectionPool:
         return None
 
     def get_connection(self, timeout: float = 10.0):
-        """获取连接 - 优先从预热队列获取"""
+        """获取连接 - 优先从预热队列获取，支持重连"""
         with self._lock:
             self.total_requests += 1
 
@@ -1078,7 +1102,8 @@ class DoubaoConnectionPool:
             if conn and conn.is_healthy():
                 with self._lock:
                     self.cache_hits += 1
-                logger.debug(f"[WS_POOL] 使用预热连接 (命中率: {self.cache_hits}/{self.total_requests})")
+                logger.debug(
+                    f"[WS_POOL] 使用预热连接 (命中率: {self.cache_hits}/{self.total_requests})")
                 return conn
             elif conn:
                 conn.close()
@@ -1087,7 +1112,23 @@ class DoubaoConnectionPool:
 
         # 2. 预热队列为空，创建新连接
         logger.debug(f"[WS_POOL] 预热队列为空，创建新连接...")
-        return self._create_new_connection()
+        new_conn = self._create_new_connection()
+
+        # 3. 如果创建失败，尝试重连机制
+        if not new_conn:
+            logger.warning("[WS_POOL] 首次连接失败，启动重连机制...")
+            for retry in range(3):
+                logger.info(f"[WS_POOL] 重连尝试 {retry + 1}/3...")
+                time.sleep(1.0)  # 等待1秒后重试
+                new_conn = self._create_new_connection()
+                if new_conn:
+                    logger.info(f"[WS_POOL] 重连成功!")
+                    break
+            else:
+                logger.error("[WS_POOL] 重连失败，无法建立连接")
+                return None
+
+        return new_conn
 
     def return_connection(self, conn):
         """归还连接 - 直接关闭（火山引擎TTS连接不可复用）"""

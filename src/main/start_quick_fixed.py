@@ -4,14 +4,15 @@
 快速启动脚本 - 修复导入路径版本
 """
 
-from logger import logger
-from dotenv import load_dotenv
-import torch.multiprocessing as mp
-import torch
 import argparse
 import json
 import os
 import sys
+
+import torch
+import torch.multiprocessing as mp
+from dotenv import load_dotenv
+from logger import logger
 
 # 将项目根目录添加到Python路径
 project_root = os.path.dirname(os.path.dirname(
@@ -300,15 +301,53 @@ def main():
 
             @pc.on("connectionstatechange")
             async def on_connectionstatechange():
+                logger.info(
+                    f"[WEBRTC] Session {sessionid} connection state: {pc.connectionState}")
                 if pc.connectionState == "failed":
-                    await pc.close()
+                    logger.error(
+                        f"[WEBRTC] Session {sessionid} connection failed, cleaning up...")
+                    try:
+                        await pc.close()
+                    except Exception as e:
+                        logger.error(f"[WEBRTC] Error closing connection: {e}")
                     pcs.discard(pc)
                     if sessionid in nerfreals:
-                        del nerfreals[sessionid]
+                        try:
+                            nerfreal = nerfreals[sessionid]
+                            # 关闭TTS连接池
+                            if hasattr(nerfreal, 'tts') and hasattr(nerfreal.tts, 'shutdown'):
+                                nerfreal.tts.shutdown()
+                            del nerfreals[sessionid]
+                            logger.info(
+                                f"[WEBRTC] Session {sessionid} cleaned up")
+                        except Exception as e:
+                            logger.error(
+                                f"[WEBRTC] Error cleaning up session {sessionid}: {e}")
                 elif pc.connectionState == "closed":
+                    logger.info(
+                        f"[WEBRTC] Session {sessionid} connection closed")
                     pcs.discard(pc)
                     if sessionid in nerfreals:
-                        del nerfreals[sessionid]
+                        try:
+                            nerfreal = nerfreals[sessionid]
+                            # 关闭TTS连接池
+                            if hasattr(nerfreal, 'tts') and hasattr(nerfreal.tts, 'shutdown'):
+                                nerfreal.tts.shutdown()
+                            del nerfreals[sessionid]
+                            logger.info(
+                                f"[WEBRTC] Session {sessionid} cleaned up")
+                        except Exception as e:
+                            logger.error(
+                                f"[WEBRTC] Error cleaning up session {sessionid}: {e}")
+                elif pc.connectionState == "disconnected":
+                    logger.warning(
+                        f"[WEBRTC] Session {sessionid} connection disconnected")
+                elif pc.connectionState == "connecting":
+                    logger.info(
+                        f"[WEBRTC] Session {sessionid} connection connecting...")
+                elif pc.connectionState == "connected":
+                    logger.info(
+                        f"[WEBRTC] Session {sessionid} connection connected successfully")
 
             # 创建媒体轨道
             player = HumanPlayer(nerfreals[sessionid])

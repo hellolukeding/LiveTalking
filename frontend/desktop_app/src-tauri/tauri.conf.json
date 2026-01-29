@@ -14,7 +14,9 @@
       {
         "title": "livetalking-pc",
         "width": 1280,
-        "height": 960
+        "height": 960,
+        "dragDropEnabled": true,
+        "fileDropEnabled": false
       }
     ],
     "security": {
@@ -32,7 +34,11 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "此应用需要麦克风权限来进行语音识别",
+        "NSSpeechRecognitionUsageDescription": "此应用需要语音识别权限"
+      }
     },
     "windows": {
       "wix": {

@@ -442,9 +442,17 @@ class LipReal(BaseReal):
         # _totalframe=0
 
         # 腾讯ASR相关变量
+        # 腾讯ASR相关变量
         asr_count = 0
-        # 将触发间隔降一半以更快响应（25 帧 ≈ 0.5s），实际触发频率可调
-        asr_interval = 25
+        # 支持通过环境变量调整 ASR 触发频率与采样时长，便于在延迟/准确率之间权衡
+        try:
+            asr_interval = int(os.getenv('ASR_INTERVAL_FRAMES', '25'))
+        except Exception:
+            asr_interval = 25
+        try:
+            asr_duration_ms = int(os.getenv('TENCENT_ASR_DURATION_MS', '1000'))
+        except Exception:
+            asr_duration_ms = 1000
 
         while not quit_event.is_set():
             # update texture every frame
@@ -459,8 +467,8 @@ class LipReal(BaseReal):
                 asr_count = 0
                 # 收集音频数据并运行腾讯ASR
                 try:
-                    # 收集1秒音频作为单次识别单元，避免过长导致异步任务/延迟
-                    audio_data = self._collect_audio_data(1000)
+                    # 收集指定时长的音频作为单次识别单元，避免过长导致异步任务/延迟
+                    audio_data = self._collect_audio_data(asr_duration_ms)
                     if len(audio_data) > 1000:  # 确保有足够的音频数据
                         try:
                             # 优先将协程安全地提交到传入的事件循环（如果在运行）

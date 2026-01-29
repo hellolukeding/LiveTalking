@@ -11,8 +11,6 @@ import sys
 
 import torch
 import torch.multiprocessing as mp
-from dotenv import load_dotenv
-from logger import logger
 
 # 将项目根目录添加到Python路径
 project_root = os.path.dirname(os.path.dirname(
@@ -23,11 +21,12 @@ sys.path.insert(0, os.path.join(project_root, 'src', 'core'))
 sys.path.insert(0, os.path.join(project_root, 'src', 'llm'))
 sys.path.insert(0, os.path.join(project_root, 'src', 'utils'))
 
-
 # 加载环境变量
+from dotenv import load_dotenv
 load_dotenv()
 
 # 导入日志
+from utils.logger import logger
 
 
 def setup_config():
@@ -73,8 +72,8 @@ def setup_config():
             self.asr = os.getenv('ASR_TYPE', 'lip')
 
             # 传输配置
-            self.transport = 'webrtc'
-            self.push_url = 'http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream'
+            self.transport = 'rtmp'  # 使用 rtmp 推流模式
+            self.push_url = 'rtmp://localhost/live/livestream'  # SRS RTMP 推流地址
             self.max_session = 1
             # 使用环境变量中的端口，如果没有则使用8011（避免8010被占用）
             self.listenport = int(os.getenv('LISTEN_PORT', 8011))

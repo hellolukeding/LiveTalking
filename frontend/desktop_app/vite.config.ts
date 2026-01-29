@@ -17,7 +17,8 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // 当 TAURI_DEV_HOST 未设置时，将 host 设为 true 以绑定到 0.0.0.0（允许通过 IP 访问）
+    host: host || true,
     hmr: host
       ? {
         protocol: "ws",

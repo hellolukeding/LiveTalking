@@ -223,20 +223,28 @@ class BaseReal:
                     return False
 
             for f, d in pending:
-                try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        _try_put(self.audio_track._queue, (f, d)), queue_loop)
-                    ok = fut.result(timeout=0.2)
-                    if ok:
-                        sent += 1
-                    else:
-                        failed.append((f, d))
-                        break  # queue full, stop and requeue the rest
-                except Exception as e:
-                    logger.warning(
-                        f"[BASE_REAL] Failed to flush pending audio frame: {e}")
+                attempt = 0
+                success = False
+                # 尝试多次放入队列以处理短暂的队列满情况
+                while attempt < 3 and not success:
+                    attempt += 1
+                    try:
+                        fut = asyncio.run_coroutine_threadsafe(
+                            _try_put(self.audio_track._queue, (f, d)), queue_loop)
+                        ok = fut.result(timeout=0.5)
+                        if ok:
+                            sent += 1
+                            success = True
+                            break
+                        else:
+                            # 等待一小段时间再重试
+                            time.sleep(0.01)
+                    except Exception as e:
+                        logger.warning(
+                            f"[BASE_REAL] Failed to flush pending audio frame (attempt {attempt}): {e}")
+                        time.sleep(0.01)
+                if not success:
                     failed.append((f, d))
-                    break
 
             # 如果有未发送的帧，放回_pending_audio头部
             if failed:
@@ -244,7 +252,7 @@ class BaseReal:
                     self._pending_audio = failed + self._pending_audio
 
             logger.info(
-                f"[BASE_REAL] Flushed {sent} pending audio frames to track")
+                f"[BASE_REAL] Flushed {sent} pending audio frames to track (remaining pending: {len(self._pending_audio)})")
         else:
             # 如果仍然没有事件循环，则重新放回缓冲区
             with self._pending_audio_lock:

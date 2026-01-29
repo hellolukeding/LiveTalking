@@ -1,0 +1,102 @@
+2026-01-30 02:14:56,838 - WARNING - ⚠️  无法导入健康检查模块，跳过健康检查
+WARNING:logger:⚠️  无法导入健康检查模块，跳过健康检查
+2026-01-30 02:14:57,858 - INFO - Namespace(fps=50, l=10, m=8, r=10, W=450, H=450, avatar_id='wav2lip256_avatar1', batch_size=16, customvideo_config='', tts='edge', REF_FILE='zh_female_xiaohe_uranus_bigtts', REF_TEXT=None, TTS_SERVER='http://127.0.0.1:9880', model='wav2lip', transport='rtcpush', push_url='http://localhost:1985/rtc/v1/whip/?app=live', max_session=1, listenport=8010, asr=None, customopt=[])
+INFO:logger:Namespace(fps=50, l=10, m=8, r=10, W=450, H=450, avatar_id='wav2lip256_avatar1', batch_size=16, customvideo_config='', tts='edge', REF_FILE='zh_female_xiaohe_uranus_bigtts', REF_TEXT=None, TTS_SERVER='http://127.0.0.1:9880', model='wav2lip', transport='rtcpush', push_url='http://localhost:1985/rtc/v1/whip/?app=live', max_session=1, listenport=8010, asr=None, customopt=[])
+2026-01-30 02:14:58,020 - DEBUG - Load checkpoint from: ./models/wav2lip256.pth
+DEBUG:logger:Load checkpoint from: ./models/wav2lip256.pth
+2026-01-30 02:14:58,245 - DEBUG - reading images...
+DEBUG:logger:reading images...
+Using mps for inference.
+  0%|          | 0/537 [00:00<?, ?it/s]  1%|          | 6/537 [00:00<00:10, 50.75it/s]  2%|▏         | 12/537 [00:00<00:10, 51.09it/s]  3%|▎         | 18/537 [00:00<00:10, 50.01it/s]  4%|▍         | 24/537 [00:00<00:10, 50.33it/s]  6%|▌         | 30/537 [00:00<00:10, 49.88it/s]  7%|▋         | 35/537 [00:00<00:10, 49.32it/s]  8%|▊         | 41/537 [00:00<00:09, 50.10it/s]  9%|▉         | 47/537 [00:00<00:09, 50.34it/s] 10%|▉         | 53/537 [00:01<00:09, 50.68it/s] 11%|█         | 59/537 [00:01<00:09, 51.14it/s] 12%|█▏        | 65/537 [00:01<00:09, 51.47it/s] 13%|█▎        | 71/537 [00:01<00:09, 51.55it/s] 14%|█▍        | 77/537 [00:01<00:08, 52.09it/s] 15%|█▌        | 83/537 [00:01<00:08, 52.38it/s] 17%|█▋        | 89/537 [00:01<00:08, 52.54it/s] 18%|█▊        | 95/537 [00:01<00:08, 51.80it/s] 19%|█▉        | 101/537 [00:01<00:08, 51.01it/s] 20%|█▉        | 107/537 [00:02<00:08, 51.36it/s] 21%|██        | 113/537 [00:02<00:08, 51.49it/s] 22%|██▏       | 119/537 [00:02<00:08, 51.63it/s] 23%|██▎       | 125/537 [00:02<00:07, 51.72it/s] 24%|██▍       | 131/537 [00:02<00:07, 51.69it/s] 26%|██▌       | 137/537 [00:02<00:07, 52.35it/s] 27%|██▋       | 143/537 [00:02<00:07, 52.60it/s] 28%|██▊       | 149/537 [00:02<00:07, 52.57it/s] 29%|██▉       | 155/537 [00:03<00:07, 52.61it/s] 30%|██▉       | 161/537 [00:03<00:07, 52.68it/s] 31%|███       | 167/537 [00:03<00:07, 52.23it/s] 32%|███▏      | 173/537 [00:03<00:07, 51.86it/s] 33%|███▎      | 179/537 [00:03<00:06, 51.67it/s] 34%|███▍      | 185/537 [00:03<00:06, 51.73it/s] 36%|███▌      | 191/537 [00:03<00:06, 51.81it/s] 37%|███▋      | 197/537 [00:03<00:06, 51.91it/s] 38%|███▊      | 203/537 [00:03<00:06, 51.80it/s] 39%|███▉      | 209/537 [00:04<00:06, 51.41it/s] 40%|████      | 215/537 [00:04<00:06, 51.47it/s] 41%|████      | 221/537 [00:04<00:06, 51.49it/s] 42%|████▏     | 227/537 [00:04<00:06, 51.58it/s] 43%|████▎     | 233/537 [00:04<00:05, 52.00it/s] 45%|████▍     | 239/537 [00:04<00:05, 52.03it/s] 46%|████▌     | 245/537 [00:04<00:05, 52.01it/s] 47%|████▋     | 251/537 [00:04<00:05, 52.06it/s] 48%|████▊     | 257/537 [00:04<00:05, 51.70it/s] 49%|████▉     | 263/537 [00:05<00:05, 51.57it/s] 50%|█████     | 269/537 [00:05<00:05, 51.61it/s] 51%|█████     | 275/537 [00:05<00:05, 51.57it/s] 52%|█████▏    | 281/537 [00:05<00:04, 52.11it/s] 53%|█████▎    | 287/537 [00:05<00:04, 52.54it/s] 55%|█████▍    | 293/537 [00:05<00:04, 52.58it/s] 56%|█████▌    | 299/537 [00:05<00:04, 52.42it/s] 57%|█████▋    | 305/537 [00:05<00:04, 52.66it/s] 58%|█████▊    | 311/537 [00:06<00:04, 52.17it/s] 59%|█████▉    | 317/537 [00:06<00:04, 52.26it/s] 60%|██████    | 323/537 [00:06<00:04, 52.56it/s] 61%|██████▏   | 329/537 [00:06<00:03, 52.01it/s] 62%|██████▏   | 335/537 [00:06<00:03, 52.48it/s] 64%|██████▎   | 341/537 [00:06<00:03, 52.76it/s] 65%|██████▍   | 347/537 [00:06<00:03, 53.11it/s] 66%|██████▌   | 353/537 [00:06<00:03, 53.02it/s] 67%|██████▋   | 359/537 [00:06<00:03, 52.70it/s] 68%|██████▊   | 365/537 [00:07<00:03, 52.23it/s] 69%|██████▉   | 371/537 [00:07<00:03, 52.09it/s] 70%|███████   | 377/537 [00:07<00:03, 52.35it/s] 71%|███████▏  | 383/537 [00:07<00:02, 52.28it/s] 72%|███████▏  | 389/537 [00:07<00:02, 52.29it/s] 74%|███████▎  | 395/537 [00:07<00:02, 52.19it/s] 75%|███████▍  | 401/537 [00:07<00:02, 52.31it/s] 76%|███████▌  | 407/537 [00:07<00:02, 52.25it/s] 77%|███████▋  | 413/537 [00:07<00:02, 52.16it/s] 78%|███████▊  | 419/537 [00:08<00:02, 51.99it/s] 79%|███████▉  | 425/537 [00:08<00:02, 52.07it/s] 80%|████████  | 431/537 [00:08<00:02, 52.22it/s] 81%|████████▏ | 437/537 [00:08<00:01, 52.46it/s] 82%|████████▏ | 443/537 [00:08<00:01, 52.61it/s] 84%|████████▎ | 449/537 [00:08<00:01, 52.74it/s] 85%|████████▍ | 455/537 [00:08<00:01, 52.81it/s] 86%|████████▌ | 461/537 [00:08<00:01, 52.73it/s] 87%|████████▋ | 467/537 [00:08<00:01, 52.16it/s] 88%|████████▊ | 473/537 [00:09<00:01, 51.87it/s] 89%|████████▉ | 479/537 [00:09<00:01, 51.63it/s] 90%|█████████ | 485/537 [00:09<00:01, 51.73it/s] 91%|█████████▏| 491/537 [00:09<00:00, 52.30it/s] 93%|█████████▎| 497/537 [00:09<00:00, 53.01it/s] 94%|█████████▎| 503/537 [00:09<00:00, 53.22it/s] 95%|█████████▍| 509/537 [00:09<00:00, 52.45it/s] 96%|█████████▌| 515/537 [00:09<00:00, 52.13it/s] 97%|█████████▋| 521/537 [00:10<00:00, 51.62it/s] 98%|█████████▊| 527/537 [00:10<00:00, 46.85it/s] 99%|█████████▉| 532/537 [00:10<00:00, 44.06it/s]100%|██████████| 537/537 [00:10<00:00, 51.56it/s]
+2026-01-30 02:15:08,683 - DEBUG - reading images...
+DEBUG:logger:reading images...
+  0%|          | 0/537 [00:00<?, ?it/s] 12%|█▏        | 66/537 [00:00<00:00, 650.95it/s] 25%|██▍       | 132/537 [00:00<00:00, 654.53it/s] 38%|███▊      | 203/537 [00:00<00:00, 677.48it/s] 51%|█████     | 274/537 [00:00<00:00, 687.01it/s] 64%|██████▍   | 344/537 [00:00<00:00, 687.80it/s] 77%|███████▋  | 413/537 [00:00<00:00, 678.40it/s] 90%|████████▉ | 481/537 [00:00<00:00, 634.12it/s]100%|██████████| 537/537 [00:00<00:00, 660.42it/s]
+2026-01-30 02:15:09,497 - DEBUG - warmup model...
+DEBUG:logger:warmup model...
+2026-01-30 02:15:09,883 - INFO - start http server; http://<serverip>:8010/rtcpushapi.html
+INFO:logger:start http server; http://<serverip>:8010/rtcpushapi.html
+2026-01-30 02:15:09,885 - INFO - 如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:8010/dashboard.html
+INFO:logger:如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:8010/dashboard.html
+2026-01-30 02:15:09,892 - INFO - [DOUBAO_TTS] 初始化: appid=8228021615, voice_id=zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+INFO:logger:[DOUBAO_TTS] 初始化: appid=8228021615, voice_id=zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+2026-01-30 02:15:09,895 - INFO - [WS_MANAGER] 使用 resource_id: seed-tts-1.0, voice_id: zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+INFO:logger:[WS_MANAGER] 使用 resource_id: seed-tts-1.0, voice_id: zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+2026-01-30 02:15:09,895 - INFO - [WS_POOL] 连接池初始化: sample_rate=16000, max_connections=3
+INFO:logger:[WS_POOL] 连接池初始化: sample_rate=16000, max_connections=3
+2026-01-30 02:15:09,898 - INFO - [DOUBAO_TTS] 初始化完成
+INFO:logger:[DOUBAO_TTS] 初始化完成
+2026-01-30 02:15:09,898 - INFO - [METRICS] res_drop_count=0 video_drop=0 res_qsize=0
+INFO:logger:[METRICS] res_drop_count=0 video_drop=0 res_qsize=0
+2026-01-30 02:15:10,066 - INFO - [WS_MANAGER] WebSocket v3连接成功建立
+INFO:logger:[WS_MANAGER] WebSocket v3连接成功建立
+2026-01-30 02:15:10,068 - DEBUG - [WS_POOL] 预热连接已就绪 (队列: 1)
+DEBUG:logger:[WS_POOL] 预热连接已就绪 (队列: 1)
+2026-01-30 02:15:10,460 - DEBUG - [ASR] Using Tencent ASR with secret_id: AKIDnZO7...
+DEBUG:logger:[ASR] Using Tencent ASR with secret_id: AKIDnZO7...
+2026-01-30 02:15:10,593 - INFO - [WS_MANAGER] 使用 resource_id: seed-tts-1.0, voice_id: zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+INFO:logger:[WS_MANAGER] 使用 resource_id: seed-tts-1.0, voice_id: zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+2026-01-30 02:15:10,732 - INFO - [WS_MANAGER] WebSocket v3连接成功建立
+INFO:logger:[WS_MANAGER] WebSocket v3连接成功建立
+2026-01-30 02:15:10,732 - DEBUG - [WS_POOL] 预热连接已就绪 (队列: 2)
+DEBUG:logger:[WS_POOL] 预热连接已就绪 (队列: 2)
+2026-01-30 02:15:11,234 - INFO - [WS_MANAGER] 使用 resource_id: seed-tts-1.0, voice_id: zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+INFO:logger:[WS_MANAGER] 使用 resource_id: seed-tts-1.0, voice_id: zh_female_tianxinxiaomei_emo_v2_mars_bigtts
+2026-01-30 02:15:11,364 - INFO - [WS_MANAGER] WebSocket v3连接成功建立
+INFO:logger:[WS_MANAGER] WebSocket v3连接成功建立
+2026-01-30 02:15:11,364 - DEBUG - [WS_POOL] 预热连接已就绪 (队列: 3)
+DEBUG:logger:[WS_POOL] 预热连接已就绪 (队列: 3)
+2026-01-30 02:15:15,537 - INFO - Error: Server disconnected
+INFO:logger:Error: Server disconnected
+Traceback (most recent call last):
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/src/main/app.py", line 817, in <module>
+    run_server(web.AppRunner(appasync))
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/src/main/app.py", line 814, in run_server
+    loop.run_until_complete(run(push_url, k))
+  File "/Users/lukeding/.pyenv/versions/3.12.3/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/src/main/app.py", line 657, in run
+    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type='answer'))
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/.venv/lib/python3.12/site-packages/aiortc/rtcpeerconnection.py", line 878, in setRemoteDescription
+    description = sdp.SessionDescription.parse(sessionDescription.sdp)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/.venv/lib/python3.12/site-packages/aiortc/sdp.py", line 390, in parse
+    session_lines, media_groups = grouplines(sdp)
+                                  ^^^^^^^^^^^^^^^
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/.venv/lib/python3.12/site-packages/aiortc/sdp.py", line 141, in grouplines
+    for line in sdp.splitlines():
+                ^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'splitlines'
+2026-01-30 02:17:04,568 - WARNING - ⚠️  无法导入健康检查模块，跳过健康检查
+WARNING:logger:⚠️  无法导入健康检查模块，跳过健康检查
+2026-01-30 02:17:05,440 - INFO - Namespace(fps=50, l=10, m=8, r=10, W=450, H=450, avatar_id='wav2lip256_avatar1', batch_size=16, customvideo_config='', tts='edge', REF_FILE='zh_female_xiaohe_uranus_bigtts', REF_TEXT=None, TTS_SERVER='http://127.0.0.1:9880', model='wav2lip', transport='rtcpush', push_url='http://localhost:1985/rtc/v1/whip/?app=live', max_session=1, listenport=8010, asr=None, customopt=[])
+INFO:logger:Namespace(fps=50, l=10, m=8, r=10, W=450, H=450, avatar_id='wav2lip256_avatar1', batch_size=16, customvideo_config='', tts='edge', REF_FILE='zh_female_xiaohe_uranus_bigtts', REF_TEXT=None, TTS_SERVER='http://127.0.0.1:9880', model='wav2lip', transport='rtcpush', push_url='http://localhost:1985/rtc/v1/whip/?app=live', max_session=1, listenport=8010, asr=None, customopt=[])
+2026-01-30 02:17:05,608 - DEBUG - Load checkpoint from: ./models/wav2lip256.pth
+DEBUG:logger:Load checkpoint from: ./models/wav2lip256.pth
+2026-01-30 02:17:05,887 - DEBUG - reading images...
+DEBUG:logger:reading images...
+Using mps for inference.
+  0%|          | 0/537 [00:00<?, ?it/s]  1%|          | 5/537 [00:00<00:11, 45.61it/s]  2%|▏         | 10/537 [00:00<00:11, 46.56it/s]  3%|▎         | 15/537 [00:00<00:10, 47.65it/s]  4%|▍         | 21/537 [00:00<00:10, 49.02it/s]  5%|▌         | 27/537 [00:00<00:10, 49.83it/s]  6%|▌         | 33/537 [00:00<00:09, 50.54it/s]  7%|▋         | 39/537 [00:00<00:09, 50.81it/s]  8%|▊         | 45/537 [00:00<00:09, 50.86it/s]  9%|▉         | 51/537 [00:01<00:09, 51.23it/s] 11%|█         | 57/537 [00:01<00:09, 51.54it/s] 12%|█▏        | 63/537 [00:01<00:09, 51.94it/s] 13%|█▎        | 69/537 [00:01<00:09, 50.56it/s] 14%|█▍        | 75/537 [00:01<00:09, 50.37it/s] 15%|█▌        | 81/537 [00:01<00:08, 50.80it/s] 16%|█▌        | 87/537 [00:01<00:08, 50.77it/s] 17%|█▋        | 93/537 [00:01<00:09, 49.22it/s] 18%|█▊        | 98/537 [00:01<00:08, 49.08it/s] 19%|█▉        | 103/537 [00:02<00:09, 46.66it/s] 20%|██        | 108/537 [00:02<00:09, 46.39it/s] 21%|██        | 113/537 [00:02<00:09, 45.89it/s] 22%|██▏       | 119/537 [00:02<00:08, 47.13it/s] 23%|██▎       | 125/537 [00:02<00:08, 48.05it/s] 24%|██▍       | 130/537 [00:02<00:08, 48.13it/s] 25%|██▌       | 135/537 [00:02<00:08, 48.56it/s] 26%|██▋       | 141/537 [00:02<00:08, 49.39it/s] 27%|██▋       | 147/537 [00:02<00:07, 50.21it/s] 28%|██▊       | 153/537 [00:03<00:07, 49.61it/s] 29%|██▉       | 158/537 [00:03<00:07, 49.31it/s] 31%|███       | 164/537 [00:03<00:07, 49.56it/s] 31%|███▏      | 169/537 [00:03<00:07, 49.42it/s] 33%|███▎      | 175/537 [00:03<00:07, 49.84it/s] 34%|███▎      | 180/537 [00:03<00:07, 49.79it/s] 34%|███▍      | 185/537 [00:03<00:07, 49.18it/s] 35%|███▌      | 190/537 [00:03<00:07, 48.35it/s] 36%|███▋      | 195/537 [00:03<00:07, 47.55it/s] 37%|███▋      | 200/537 [00:04<00:07, 47.58it/s] 38%|███▊      | 205/537 [00:04<00:06, 47.93it/s] 39%|███▉      | 211/537 [00:04<00:06, 48.74it/s] 40%|████      | 216/537 [00:04<00:06, 49.04it/s] 41%|████▏     | 222/537 [00:04<00:06, 49.85it/s] 42%|████▏     | 228/537 [00:04<00:06, 49.85it/s] 44%|████▎     | 234/537 [00:04<00:06, 50.12it/s] 45%|████▍     | 240/537 [00:04<00:06, 45.61it/s] 46%|████▌     | 246/537 [00:05<00:06, 46.62it/s] 47%|████▋     | 251/537 [00:05<00:06, 47.25it/s] 48%|████▊     | 256/537 [00:05<00:05, 47.13it/s] 49%|████▊     | 261/537 [00:05<00:06, 42.97it/s] 50%|████▉     | 266/537 [00:05<00:06, 42.22it/s] 50%|█████     | 271/537 [00:05<00:06, 41.52it/s] 51%|█████▏    | 276/537 [00:05<00:05, 43.67it/s] 53%|█████▎    | 282/537 [00:05<00:05, 46.38it/s] 53%|█████▎    | 287/537 [00:05<00:05, 44.80it/s] 55%|█████▍    | 293/537 [00:06<00:05, 46.93it/s] 56%|█████▌    | 299/537 [00:06<00:04, 48.36it/s] 57%|█████▋    | 304/537 [00:06<00:04, 48.60it/s] 58%|█████▊    | 309/537 [00:06<00:04, 47.70it/s] 58%|█████▊    | 314/537 [00:06<00:04, 45.42it/s] 59%|█████▉    | 319/537 [00:06<00:04, 45.06it/s] 60%|██████    | 324/537 [00:06<00:04, 44.67it/s] 61%|██████▏   | 329/537 [00:06<00:04, 44.34it/s] 62%|██████▏   | 334/537 [00:07<00:06, 31.57it/s] 63%|██████▎   | 338/537 [00:07<00:06, 30.87it/s] 64%|██████▎   | 342/537 [00:07<00:06, 31.87it/s] 65%|██████▍   | 347/537 [00:07<00:05, 34.91it/s] 66%|██████▌   | 353/537 [00:07<00:04, 39.43it/s] 67%|██████▋   | 358/537 [00:07<00:06, 28.48it/s] 68%|██████▊   | 363/537 [00:08<00:05, 32.10it/s] 68%|██████▊   | 367/537 [00:08<00:05, 33.21it/s] 69%|██████▉   | 371/537 [00:08<00:04, 34.63it/s] 70%|██████▉   | 375/537 [00:08<00:04, 34.50it/s] 71%|███████   | 380/537 [00:08<00:04, 37.16it/s] 72%|███████▏  | 385/537 [00:08<00:03, 40.01it/s] 73%|███████▎  | 391/537 [00:08<00:03, 43.12it/s] 74%|███████▎  | 396/537 [00:08<00:03, 43.18it/s] 75%|███████▍  | 401/537 [00:08<00:03, 44.75it/s] 76%|███████▌  | 407/537 [00:09<00:02, 47.03it/s] 77%|███████▋  | 413/537 [00:09<00:02, 48.68it/s] 78%|███████▊  | 419/537 [00:09<00:02, 50.17it/s] 79%|███████▉  | 425/537 [00:09<00:02, 51.10it/s] 80%|████████  | 431/537 [00:09<00:02, 51.96it/s] 81%|████████▏ | 437/537 [00:09<00:01, 52.62it/s] 82%|████████▏ | 443/537 [00:09<00:01, 52.80it/s] 84%|████████▎ | 449/537 [00:09<00:01, 53.07it/s] 85%|████████▍ | 455/537 [00:09<00:01, 53.36it/s] 86%|████████▌ | 461/537 [00:10<00:01, 53.39it/s] 87%|████████▋ | 467/537 [00:10<00:01, 53.23it/s] 88%|████████▊ | 473/537 [00:10<00:01, 53.37it/s] 89%|████████▉ | 479/537 [00:10<00:01, 53.42it/s] 90%|█████████ | 485/537 [00:10<00:00, 53.97it/s] 91%|█████████▏| 491/537 [00:10<00:00, 54.23it/s] 93%|█████████▎| 497/537 [00:10<00:00, 54.25it/s] 94%|█████████▎| 503/537 [00:10<00:00, 53.90it/s] 95%|█████████▍| 509/537 [00:10<00:00, 53.28it/s] 96%|█████████▌| 515/537 [00:11<00:00, 52.96it/s] 97%|█████████▋| 521/537 [00:11<00:00, 53.13it/s] 98%|█████████▊| 527/537 [00:11<00:00, 53.15it/s] 99%|█████████▉| 533/537 [00:11<00:00, 53.18it/s]100%|██████████| 537/537 [00:11<00:00, 46.90it/s]
+2026-01-30 02:17:17,371 - DEBUG - reading images...
+DEBUG:logger:reading images...
+  0%|          | 0/537 [00:00<?, ?it/s] 13%|█▎        | 70/537 [00:00<00:00, 693.32it/s] 26%|██▋       | 141/537 [00:00<00:00, 697.68it/s] 40%|███▉      | 213/537 [00:00<00:00, 706.68it/s] 53%|█████▎    | 284/537 [00:00<00:00, 706.61it/s] 66%|██████▌   | 355/537 [00:00<00:00, 706.92it/s] 79%|███████▉  | 426/537 [00:00<00:00, 707.20it/s] 93%|█████████▎| 497/537 [00:00<00:00, 704.42it/s]100%|██████████| 537/537 [00:00<00:00, 706.61it/s]
+2026-01-30 02:17:18,132 - DEBUG - warmup model...
+DEBUG:logger:warmup model...
+2026-01-30 02:17:20,498 - INFO - start http server; http://<serverip>:8010/rtcpushapi.html
+INFO:logger:start http server; http://<serverip>:8010/rtcpushapi.html
+2026-01-30 02:17:20,499 - INFO - 如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:8010/dashboard.html
+INFO:logger:如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:8010/dashboard.html
+Traceback (most recent call last):
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/src/main/app.py", line 817, in <module>
+    run_server(web.AppRunner(appasync))
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/src/main/app.py", line 808, in run_server
+    loop.run_until_complete(site.start())
+  File "/Users/lukeding/.pyenv/versions/3.12.3/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/lukeding/Desktop/playground/2025/LiveTalking/.venv/lib/python3.12/site-packages/aiohttp/web_runner.py", line 121, in start
+    self._server = await loop.create_server(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/lukeding/.pyenv/versions/3.12.3/lib/python3.12/asyncio/base_events.py", line 1572, in create_server
+    raise OSError(err.errno, msg) from None
+OSError: [Errno 48] error while attempting to bind on address ('0.0.0.0', 8010): address already in use

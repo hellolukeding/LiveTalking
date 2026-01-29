@@ -376,9 +376,11 @@ class TencentApiAsr(BaseASR):
             response = None
             last_exc = None
             async with httpx.AsyncClient() as client:
+                timeout_seconds = float(
+                    os.getenv('TENCENT_ASR_TIMEOUT', '8.0'))
                 for attempt in range(1, max_retries + 1):
                     try:
-                        response = await client.post(self._url, headers=headers, data=payload, timeout=10.0)
+                        response = await client.post(self._url, headers=headers, data=payload, timeout=timeout_seconds)
                         # Treat 5xx as transient and retryable
                         if response.status_code >= 500:
                             last_exc = RuntimeError(
@@ -406,13 +408,12 @@ class TencentApiAsr(BaseASR):
             logger.debug(
                 f"[ASR] Tencent API response keys: {list(result.keys())}")
 
-            if "Response" not in result:
-                logger.error(
-                    f"[ASR] Unexpected Tencent API response format: {result}")
-                raise RuntimeError(
-                    f"Unexpected Tencent API response format: {result}")
-
-            response_body = result["Response"]
+            # Tencent API may wrap result in a top-level "Response" object
+            # or return fields at the top-level in some variants. Accept both.
+            if "Response" in result and isinstance(result["Response"], dict):
+                response_body = result["Response"]
+            else:
+                response_body = result
 
             # Check for errors
             if "Error" in response_body:
@@ -434,17 +435,31 @@ class TencentApiAsr(BaseASR):
                     raise RuntimeError(
                         f"Tencent ASR API error - Code: {error_code}, Message: {error_msg}")
 
-            # Extract transcript
+            # Extract transcript. Tencent may return various keys depending on API/version.
             transcript = None
-            if isinstance(response_body.get("Result"), str) and response_body.get("Result"):
-                transcript = response_body.get("Result")
+            # Common string fields
+            for key in ("Result", "Text", "Transcript", "TextResult"):
+                if isinstance(response_body.get(key), str) and response_body.get(key):
+                    transcript = response_body.get(key)
+                    break
 
-            # Try alternative keys
-            if not transcript:
-                for alt_key in ("Text", "Transcript", "TextResult"):
-                    if isinstance(response_body.get(alt_key), str) and response_body.get(alt_key):
-                        transcript = response_body.get(alt_key)
-                        break
+            # Some responses include a WordList (detailed words). Join them if present.
+            if not transcript and isinstance(response_body.get("WordList"), list):
+                try:
+                    words = []
+                    for w in response_body.get("WordList", []):
+                        if isinstance(w, dict):
+                            # Tencent may provide 'Word' or 'Text'
+                            word_text = w.get("Word") or w.get(
+                                "Text") or w.get("WordStr")
+                            if word_text:
+                                words.append(word_text)
+                        elif isinstance(w, str):
+                            words.append(w)
+                    if words:
+                        transcript = "".join(words)
+                except Exception:
+                    transcript = None
 
             # Handle async response
             if not transcript:

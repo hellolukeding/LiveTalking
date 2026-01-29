@@ -222,6 +222,9 @@ class HumanPlayer:
                     self.__video
                 ),
             )
+            # Make the worker a daemon so it won't block process exit if it
+            # doesn't terminate promptly on KeyboardInterrupt.
+            self.__thread.daemon = True
             self.__thread.start()
             mylogger.debug("[HumanPlayer] Worker thread started")
 
@@ -233,7 +236,14 @@ class HumanPlayer:
 
         if not self.__started and self.__thread is not None:
             self.__thread_quit.set()
-            self.__thread.join()
+            # join with timeout to avoid freezing shutdown if thread is stuck
+            try:
+                self.__thread.join(timeout=1.0)
+            except Exception:
+                pass
+            if self.__thread.is_alive():
+                mylogger.warning(
+                    "[HumanPlayer] Worker thread did not exit in time; continuing shutdown")
             self.__thread = None
 
         if not self.__started and self.__container is not None:

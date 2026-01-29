@@ -20,6 +20,7 @@ import asyncio
 import base64
 import gc
 import json
+import os
 import random
 import re
 import shutil
@@ -653,7 +654,10 @@ async def run(push_url, sessionid):
 
     await pc.setLocalDescription(await pc.createOffer())
     answer = await post(push_url, pc.localDescription.sdp)
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type='answer'))
+    if answer is not None:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type='answer'))
+    else:
+        logger.warning(f"[RUN] Failed to get SDP answer from {push_url}, session {sessionid} will wait for client connection")
 ##########################################
 # os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 # os.environ['MULTIPROCESSING_METHOD'] = 'forkserver'
@@ -775,7 +779,7 @@ if __name__ == '__main__':
     appasync.router.add_post("/record", record)
     appasync.router.add_post("/interrupt_talk", interrupt_talk)
     appasync.router.add_post("/is_speaking", is_speaking)
-    appasync.router.add_static('/', path='web')
+    appasync.router.add_static('/', path='frontend/web')
 
     # 配置默认CORS设置
     cors = aiohttp_cors.setup(appasync, defaults={
@@ -805,12 +809,14 @@ if __name__ == '__main__':
         loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, '0.0.0.0', opt.listenport)
         loop.run_until_complete(site.start())
-        if opt.transport == 'rtcpush':
-            for k in range(opt.max_session):
-                push_url = opt.push_url
-                if k != 0:
-                    push_url = opt.push_url+str(k)
-                loop.run_until_complete(run(push_url, k))
+        # 禁用自动创建会话的预热逻辑，避免占用会话配额
+        # if opt.transport == 'rtcpush':
+        #     for k in range(opt.max_session):
+        #         push_url = opt.push_url
+        #         if k != 0:
+        #             push_url = opt.push_url+str(k)
+        #         loop.run_until_complete(run(push_url, k))
+        logger.info(f"[SERVER] Ready to accept up to {opt.max_session} client connections")
         loop.run_forever()
     # Thread(target=run_server, args=(web.AppRunner(appasync),)).start()
     run_server(web.AppRunner(appasync))

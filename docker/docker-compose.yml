@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # SRS 流媒体服务器
   srs:
@@ -69,11 +67,11 @@ services:
       retries: 3
       start_period: 60s
 
-  # 前端 Web 服务 (可选)
+  # 前端 Web 服务 (使用本地打包文件)
   frontend:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.frontend
+      context: .
+      dockerfile: docker/Dockerfile.frontend.local
     container_name: livetalking-frontend
     ports:
       - "80:80"

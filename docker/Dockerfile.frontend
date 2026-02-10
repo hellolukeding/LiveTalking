@@ -8,13 +8,27 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 
 # 安装依赖工具
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ git
+
+# 配置npm镜像源（更稳定）
+RUN npm config set registry https://registry.npmmirror.com
 
 # 复制 package.json 和 lock 文件
 COPY frontend/desktop_app/package.json frontend/desktop_app/yarn.lock ./
 
-# 安装依赖
-RUN yarn install --frozen-lockfile
+# 配置yarn使用npm镜像和优化
+RUN yarn config set registry https://registry.npmmirror.com && \
+    yarn config set network-timeout 600000 && \
+    yarn config set fetch-retries 10 && \
+    yarn config set fetch-retry-milliseconds 10000 && \
+    yarn config set fetch-retry-maxtimeout 120000
+
+# 安装依赖（使用更长的超时和重试）
+RUN yarn install --frozen-lockfile \
+    --network-timeout 600000 \
+    --mutex network \
+    --prefer-offline || \
+    yarn install --network-timeout 600000
 
 # 复制源代码
 COPY frontend/desktop_app/ ./

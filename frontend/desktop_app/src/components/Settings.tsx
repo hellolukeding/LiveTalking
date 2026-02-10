@@ -135,7 +135,7 @@ export default function Settings({ visible, onClose }: SettingsProps) {
                 </Space>
             }
             placement="right"
-            size={{ width: 480 }}
+            size={480}
             open={visible}
             onClose={onClose}
             footer={

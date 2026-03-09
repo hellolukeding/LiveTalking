@@ -35,6 +35,7 @@ export default defineConfig(async () => ({
       '/human': 'http://localhost:8010',
       '/record': 'http://localhost:8010',
       '/is_speaking': 'http://localhost:8010',
+      '/avatars': 'http://localhost:8010',
     },
   },
 }));

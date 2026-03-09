@@ -5,15 +5,18 @@ import {
     MessageOutlined,
     PhoneOutlined,
     SettingOutlined,
-    SoundOutlined
+    SoundOutlined,
+    UserOutlined,
 } from '@ant-design/icons';
 import { message } from 'antd';
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { negotiateOffer, sendHumanMessage } from '../api';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
 import Settings from './Settings';
 
 export default function VideoChat() {
+    const navigate = useNavigate();
     const [sessionId, setSessionId] = useState<string>('0');
     const [isStarted, setIsStarted] = useState(false);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -474,6 +477,31 @@ export default function VideoChat() {
             onMouseMove={resetTimer}
             onClick={resetTimer}
         >
+            {/* 左上角：形象管理入口 */}
+            <div className="absolute top-4 left-4 z-20">
+                <button
+                    onClick={() => navigate('/avatars')}
+                    title="数字人形象管理"
+                    style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: '50%',
+                        backgroundColor: 'rgba(255,255,255,0.85)',
+                        border: 'none',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.transform = 'scale(1.1)')}
+                    onMouseLeave={e => (e.currentTarget.style.transform = 'scale(1)')}
+                >
+                    <UserOutlined style={{ fontSize: 18, color: '#5b4aff' }} />
+                </button>
+            </div>
+
             {/* 顶部通话时长和状态 */}
             {isStarted && (
                 <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3">

@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import queue
+import ssl
+import wave
 import threading
 import time
 import uuid
@@ -637,6 +639,10 @@ class DoubaoTTS(BaseTTS):
         self.optimizer = None
         self._processing_lock = threading.Lock()
         logger.info("[DOUBAO_TTS] 初始化完成")
+        self.debug_wav = wave.open("debug_doubao_tts.wav", "wb")
+        self.debug_wav.setnchannels(1)
+        self.debug_wav.setsampwidth(2)
+        self.debug_wav.setframerate(self.sample_rate)
 
     def _auto_integrate_optimizer(self):
         pass
@@ -665,6 +671,7 @@ class DoubaoTTS(BaseTTS):
                 # 简化的流式处理
                 chunk_size = self.chunk  # 320 = 20ms @ 16kHz
                 audio_buffer = np.array([], dtype=np.float32)
+                leftover_bytes = b''
                 first_chunk = True
                 total_sent = 0
                 start_time = None
@@ -676,11 +683,14 @@ class DoubaoTTS(BaseTTS):
                     if isinstance(result, bytes) and len(result) == 0:
                         continue
                     if isinstance(result, bytes) and len(result) > 0:
+                        result = leftover_bytes + result
                         aligned_len = (len(result) // 2) * 2
+                        leftover_bytes = result[aligned_len:]
                         if aligned_len > 0:
                             new_samples = np.frombuffer(
                                 result[:aligned_len], dtype=np.int16
                             ).astype(np.float32) / 32767.0
+                            self.debug_wav.writeframes((new_samples * 32767).astype(np.int16).tobytes())
                             audio_buffer = np.concatenate(
                                 [audio_buffer, new_samples])
 

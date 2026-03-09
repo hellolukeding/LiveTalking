@@ -437,14 +437,15 @@ class TencentApiAsr(BaseASR):
 
             # Extract transcript. Tencent may return various keys depending on API/version.
             transcript = None
-            # Common string fields
+            # Common string fields — accept empty string too (silence)
             for key in ("Result", "Text", "Transcript", "TextResult"):
-                if isinstance(response_body.get(key), str) and response_body.get(key):
-                    transcript = response_body.get(key)
+                val = response_body.get(key)
+                if isinstance(val, str):
+                    transcript = val
                     break
 
             # Some responses include a WordList (detailed words). Join them if present.
-            if not transcript and isinstance(response_body.get("WordList"), list):
+            if transcript is None and isinstance(response_body.get("WordList"), list):
                 try:
                     words = []
                     for w in response_body.get("WordList", []):
@@ -456,13 +457,12 @@ class TencentApiAsr(BaseASR):
                                 words.append(word_text)
                         elif isinstance(w, str):
                             words.append(w)
-                    if words:
-                        transcript = "".join(words)
+                    transcript = "".join(words)
                 except Exception:
                     transcript = None
 
             # Handle async response
-            if not transcript:
+            if transcript is None:
                 if "TaskId" in response_body:
                     task_id = response_body.get("TaskId")
                     logger.error(

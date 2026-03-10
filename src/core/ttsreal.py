@@ -626,15 +626,16 @@ class DoubaoTTS(BaseTTS):
         logger.info(
             f"[DOUBAO_TTS] 初始化: appid={self.appid}, voice_id={self.voice_id}")
 
-        # WebSocket连接池 - 直接使用16kHz
+        # WebSocket连接池 - seed-tts-1.0 返回24kHz，需要重采样到16kHz
         self.connection_pool = DoubaoConnectionPool(
             appid=self.appid,
             token=self.access_key,
             voice_id=self.voice_id,
             resource_id=self.resource_id,
-            sample_rate=16000,  # 直接使用16kHz，避免重采样
+            sample_rate=24000,  # API返回24kHz
             max_connections=3
         )
+        self.api_sample_rate = 24000  # 记录API采样率
 
         self.optimizer = None
         self._processing_lock = threading.Lock()
@@ -690,6 +691,15 @@ class DoubaoTTS(BaseTTS):
                             new_samples = np.frombuffer(
                                 result[:aligned_len], dtype=np.int16
                             ).astype(np.float32) / 32767.0
+
+                            # 重采样: 24kHz -> 16kHz
+                            if hasattr(self, 'api_sample_rate') and self.api_sample_rate != self.sample_rate:
+                                new_samples = resampy.resample(
+                                    new_samples,
+                                    sr_orig=self.api_sample_rate,
+                                    sr_new=self.sample_rate
+                                )
+
                             self.debug_wav.writeframes((new_samples * 32767).astype(np.int16).tobytes())
                             audio_buffer = np.concatenate(
                                 [audio_buffer, new_samples])
@@ -708,13 +718,6 @@ class DoubaoTTS(BaseTTS):
 
                             self.parent.put_audio_frame(chunk, eventpoint)
                             total_sent += 1
-
-                            # 实时节奏控制
-                            if start_time:
-                                expected_time = start_time + total_sent * 0.020
-                                sleep_time = expected_time - time.perf_counter()
-                                if sleep_time > 0:
-                                    time.sleep(sleep_time)
 
                 self.connection_pool.return_connection(conn)
 

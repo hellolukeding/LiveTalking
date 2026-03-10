@@ -2,7 +2,7 @@
 # LiveTalking 服务管理脚本
 # =========================================
 
-PROJECT_DIR="/Users/lukeding/Desktop/playground/2025/LiveTalking"
+PROJECT_DIR="/opt/2026/LiveTalking"
 PID_FILE="$PROJECT_DIR/livetalking.pid"
 LOG_FILE="$PROJECT_DIR/logs/livetalking.log"
 VENV_BIN="$PROJECT_DIR/.venv/bin/python"
@@ -72,22 +72,35 @@ start() {
 
     cd "$PROJECT_DIR"
 
+    # 加载 .env 文件中的环境变量
+    if [ -f "$PROJECT_DIR/.env" ]; then
+        print_message "$BLUE" "📄 加载 .env 配置文件..."
+        set -a
+        source "$PROJECT_DIR/.env"
+        set +a
+    fi
+
     # 设置环境变量
     export PYTHONPATH="${PYTHONPATH}:$(pwd):$(pwd)/src:$(pwd)/src/core:$(pwd)/src/llm:$(pwd)/src/utils:$(pwd)/src/main"
     export OMP_NUM_THREADS=8
     export PYTHONHASHSEED=0
     export MKL_NUM_THREADS=8
 
+    # 从 .env 获取 TTS 类型，默认为 doubao
+    TTS_TYPE=${TTS_TYPE:-doubao}
+    DOUBAO_VOICE_ID=${DOUBAO_VOICE_ID:-zh_female_tianxinxiaomei_emo_v2_mars_bigtts}
+
     print_message "$BLUE" "📝 配置参数:"
     print_message "$BLUE" "   - FPS: 25"
     print_message "$BLUE" "   - 分辨率: 384x384"
-    print_message "$BLUE" "   - Batch Size: 6 (优化: 平衡延迟与音频质量)"
-    print_message "$BLUE" "   - TTS: Edge"
+    print_message "$BLUE" "   - Batch Size: 16 (优化: 最大吞吐量)"
+    print_message "$BLUE" "   - TTS: $TTS_TYPE"
+    print_message "$BLUE" "   - Voice: $DOUBAO_VOICE_ID"
     print_message "$BLUE" "   - ASR: Lip"
     print_message "$BLUE" "   - Max Sessions: 5"
     print_message "$BLUE" "   - 日志文件: $LOG_FILE"
 
-    # 后台启动服务（优化配置：折中batch_size平衡流畅度与质量）
+    # 后台启动服务
     cd "$PROJECT_DIR"
     nohup "$VENV_BIN" src/main/app.py \
         --transport rtcpush \
@@ -96,10 +109,11 @@ start() {
         --fps 25 \
         -l 8 -m 6 -r 8 \
         --W 384 --H 384 \
-        --batch_size 6 \
+        --batch_size 16 \
         --listenport 8010 \
         --avatar_id wav2lip256_avatar1 \
-        --tts edge \
+        --tts $TTS_TYPE \
+        --REF_FILE $DOUBAO_VOICE_ID \
         --asr lip \
         --max_session 5 \
         >> "$LOG_FILE" 2>&1 &

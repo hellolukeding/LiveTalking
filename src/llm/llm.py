@@ -70,15 +70,21 @@ def llm_response(message, nerfreal: BaseReal):
             lastpos = 0
             # msglist = re.split('[,.!;:，。！?]',msg)
             for i, char in enumerate(msg):
-                if char in ",.!;:，。！？：；":
+                if char in ",.!;:，。！？：；\n":
                     result = result+msg[lastpos:i+1]
                     lastpos = i+1
-                    if len(result) > 10:
+                    if len(result.strip()) > 0:
                         logger.info(result)
                         nerfreal.put_msg_txt(result)
                         result = ""
             result = result+msg[lastpos:]
+            
+            # Force flush if sentence is getting too long without punctuation
+            if len(result) > 15:
+                logger.info(result)
+                nerfreal.put_msg_txt(result)
+                result = ""
     end = time.perf_counter()
     logger.info(f"llm Time to last chunk: {end-start}s")
-    if result:  # 🆕 修复：只在result不为空时发送
+    if result.strip():
         nerfreal.put_msg_txt(result)

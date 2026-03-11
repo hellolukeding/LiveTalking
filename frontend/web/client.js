@@ -6,13 +6,20 @@ function negotiate() {
     return pc.createOffer().then((offer) => {
         return pc.setLocalDescription(offer);
     }).then(() => {
-        // wait for ICE gathering to complete
+        // wait for ICE gathering to complete, but with a 1500ms timeout
         return new Promise((resolve) => {
             if (pc.iceGatheringState === 'complete') {
                 resolve();
             } else {
+                let timeoutId = setTimeout(() => {
+                    pc.removeEventListener('icegatheringstatechange', checkState);
+                    console.log("ICE gathering timed out after 1500ms, proceeding with gathered candidates.");
+                    resolve();
+                }, 1500);
+
                 const checkState = () => {
                     if (pc.iceGatheringState === 'complete') {
+                        clearTimeout(timeoutId);
                         pc.removeEventListener('icegatheringstatechange', checkState);
                         resolve();
                     }
@@ -48,7 +55,7 @@ function start() {
     };
 
     if (document.getElementById('use-stun').checked) {
-        config.iceServers = [{ urls: ['stun:stun.l.google.com:19302'] }];
+        config.iceServers = [{ urls: ['stun:stun.qq.com:3478'] }];
     }
 
     pc = new RTCPeerConnection(config);

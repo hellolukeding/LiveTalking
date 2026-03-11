@@ -153,7 +153,7 @@ async def offer(request):
 
         # Create WebRTC peer connection
         try:
-            ice_server = RTCIceServer(urls='stun:stun.l.google.com:19302')
+            ice_server = RTCIceServer(urls='stun:stun.qq.com:3478')
             pc = RTCPeerConnection(
                 configuration=RTCConfiguration(iceServers=[ice_server]))
             pcs.add(pc)

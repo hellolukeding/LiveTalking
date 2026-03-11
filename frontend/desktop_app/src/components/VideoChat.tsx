@@ -370,7 +370,7 @@ export default function VideoChat() {
                                 console.log('[ASR] Silence detected, sending largest audio:', largestBuffer.audioBlob.size, 'bytes from', buffers.length, 'chunks');
                                 await sendAudioToBackend(largestBuffer.audioBlob);
                             }
-                        }, 1000);
+                        }, 500);
                         
                     } else if (conversationStateRef.current === ConversationState.LLM_PROCESSING ||
                                conversationStateRef.current === ConversationState.TTS_PLAYING) {
@@ -565,8 +565,7 @@ export default function VideoChat() {
         const config: RTCConfiguration = {
             sdpSemantics: 'unified-plan',
             iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun.qq.com:3478' },
             ]
         } as any;
 
@@ -623,8 +622,15 @@ export default function VideoChat() {
                 if (pc.iceGatheringState === 'complete') {
                     resolve();
                 } else {
+                    let timeoutId = setTimeout(() => {
+                        pc.removeEventListener('icegatheringstatechange', checkState);
+                        console.log("ICE gathering timed out after 1500ms, proceeding with gathered candidates.");
+                        resolve();
+                    }, 1500);
+
                     const checkState = () => {
                         if (pc.iceGatheringState === 'complete') {
+                            clearTimeout(timeoutId);
                             pc.removeEventListener('icegatheringstatechange', checkState);
                             resolve();
                         }

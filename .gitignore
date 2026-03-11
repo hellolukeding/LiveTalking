@@ -23,3 +23,19 @@ dist
 
 **/*/node_modules/
 results/
+
+# Virtual environments
+.venv/
+**/.venv/
+
+# Runtime files
+*.pid
+
+# Debug files
+debug_*.wav
+
+# Backup files
+*.backup_*
+
+# Reference data
+refer/

@@ -245,14 +245,24 @@ class LightReal(BaseReal):
         self.idx = 0
         self.res_frame_queue = Queue(self.batch_size*2)  # mp.Queue
         # self.__loadavatar()
-        audio_processor = model
+        self.audio_processor = model
         self.model, self.frame_list_cycle, self.face_list_cycle, self.coord_list_cycle = avatar
 
-        self.asr = HubertASR(opt, self, audio_processor)
-        self.asr.warm_up()
-        # self.__warm_up()
+        # 🚀 延迟初始化 ASR 以加快 /offer 响应速度
+        self.asr = None
+        self._asr_initialized = False
 
         self.render_event = mp.Event()
+
+    def _ensure_asr_initialized(self):
+        """延迟初始化 ASR（线程安全）"""
+        if self._asr_initialized:
+            return
+        logger.info(f"[LightReal] 延迟初始化 ASR")
+        self.asr = HubertASR(self.opt, self, self.audio_processor)
+        self.asr.warm_up()
+        self._asr_initialized = True
+        logger.info(f"[LightReal] ASR 初始化完成")
 
     # def __del__(self):
     #     logger.info(f'lightreal({self.sessionid}) delete')
@@ -272,6 +282,10 @@ class LightReal(BaseReal):
         return combine_frame
 
     def render(self, quit_event, loop=None, audio_track=None, video_track=None):
+        # 🚀 延迟初始化 ASR 和 TTS（首次 render 时执行）
+        self._ensure_asr_initialized()
+        self._ensure_tts_initialized()
+
         # if self.opt.asr:
         #     self.asr.warm_up()
 
@@ -282,7 +296,8 @@ class LightReal(BaseReal):
         self.loop = loop
 
         # 传递音轨与事件循环以支持 TTS 直接转发到 WebRTC
-        self.tts.render(quit_event, audio_track, loop)
+        if self.tts:
+            self.tts.render(quit_event, audio_track, loop)
         try:
             self._flush_pending_audio()
         except Exception:

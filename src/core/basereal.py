@@ -21,6 +21,7 @@ import math
 import os
 import queue
 import subprocess
+import threading
 import time
 from fractions import Fraction
 from io import BytesIO
@@ -75,27 +76,11 @@ class BaseReal:
         self.chunk = self.sample_rate // opt.fps
         self.sessionid = self.opt.sessionid
 
-        if opt.tts == "doubao":
-            self.tts = DoubaoTTS(opt, self)
-        elif opt.tts == "edgetts":
-            self.tts = EdgeTTS(opt, self)
-        elif opt.tts == "gpt-sovits":
-            self.tts = SovitsTTS(opt, self)
-        elif opt.tts == "xtts":
-            self.tts = XTTS(opt, self)
-        elif opt.tts == "cosyvoice":
-            self.tts = CosyVoiceTTS(opt, self)
-        elif opt.tts == "fishtts":
-            self.tts = FishTTS(opt, self)
-        elif opt.tts == "tencent":
-            self.tts = TencentTTS(opt, self)
-        elif opt.tts == "indextts2":
-            self.tts = IndexTTS2(opt, self)
-        elif opt.tts == "azuretts":
-            self.tts = AzureTTS(opt, self)
-        else:
-            # 默认使用doubao
-            self.tts = DoubaoTTS(opt, self)
+        # 🚀 延迟初始化 TTS 以加快 /offer 响应速度
+        # TTS 初始化可能涉及网络连接，放在 render() 中异步执行
+        self._tts_initialized = False
+        self._tts_lock = threading.Lock()
+        self.tts = None
 
         self.speaking = False
 
@@ -120,7 +105,6 @@ class BaseReal:
 
         # Pending audio frames queued when audio_track or its event loop is not ready
         # Use a thread-safe list to buffer frames and flush later when possible
-        import threading
         self._pending_audio = []  # list of (AudioFrame, datainfo)
         self._pending_audio_lock = threading.Lock()
 
@@ -136,8 +120,43 @@ class BaseReal:
         else:
             logger.debug(f"No datachannel to send msg: {msg}")
 
+    def _ensure_tts_initialized(self):
+        """延迟初始化 TTS（线程安全）"""
+        if self._tts_initialized:
+            return
+        with self._tts_lock:
+            if self._tts_initialized:
+                return
+            logger.info(f"[BaseReal] 延迟初始化 TTS: type={self.opt.tts}")
+            tts_type = self.opt.tts
+            if tts_type == "doubao":
+                self.tts = DoubaoTTS(self.opt, self)
+            elif tts_type == "edgetts":
+                self.tts = EdgeTTS(self.opt, self)
+            elif tts_type == "gpt-sovits":
+                self.tts = SovitsTTS(self.opt, self)
+            elif tts_type == "xtts":
+                self.tts = XTTS(self.opt, self)
+            elif tts_type == "cosyvoice":
+                self.tts = CosyVoiceTTS(self.opt, self)
+            elif tts_type == "fishtts":
+                self.tts = FishTTS(self.opt, self)
+            elif tts_type == "tencent":
+                self.tts = TencentTTS(self.opt, self)
+            elif tts_type == "indextts2":
+                self.tts = IndexTTS2(self.opt, self)
+            elif tts_type == "azuretts":
+                self.tts = AzureTTS(self.opt, self)
+            else:
+                # 默认使用doubao
+                self.tts = DoubaoTTS(self.opt, self)
+            self._tts_initialized = True
+            logger.info(f"[BaseReal] TTS 初始化完成")
+
     def put_msg_txt(self, msg, datainfo: dict = {}):
-        self.tts.put_msg_txt(msg, datainfo)
+        self._ensure_tts_initialized()
+        if self.tts:
+            self.tts.put_msg_txt(msg, datainfo)
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
@@ -290,7 +309,8 @@ class BaseReal:
         return stream
 
     def flush_talk(self):
-        self.tts.flush_talk()
+        if self.tts:
+            self.tts.flush_talk()
         # 兼容不同的ASR实现
         if hasattr(self, 'asr'):
             self.asr.flush_talk()

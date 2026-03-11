@@ -258,12 +258,11 @@ class LipReal(BaseReal):
         self.model = model
         self.frame_list_cycle, self.face_list_cycle, self.coord_list_cycle = avatar
 
-        # 保留LipASR用于口型驱动的特征提取
-        self.lip_asr = LipASR(opt, self)
-        self.lip_asr.warm_up()
-
-        # 新增腾讯ASR用于文本识别
-        self.tencent_asr = TencentApiAsr(opt, self)
+        # 🚀 延迟初始化 ASR 以加快 /offer 响应速度
+        # ASR 初始化可能涉及凭据验证等耗时操作，放在 render() 中异步执行
+        self.lip_asr = None
+        self.tencent_asr = None
+        self._asr_initialized = False
 
         # ASR音频收集缓冲区
         self.asr_audio_buffer = []
@@ -273,6 +272,25 @@ class LipReal(BaseReal):
         self._asr_running = False
 
         self.render_event = mp.Event()
+
+    def _ensure_asr_initialized(self):
+        """延迟初始化 ASR（线程安全）"""
+        if self._asr_initialized:
+            return
+        logger.info(f"[LipReal] 延迟初始化 ASR")
+        # 保留LipASR用于口型驱动的特征提取
+        self.lip_asr = LipASR(self.opt, self)
+        self.lip_asr.warm_up()
+
+        # 新增腾讯ASR用于文本识别
+        try:
+            self.tencent_asr = TencentApiAsr(self.opt, self)
+        except Exception as e:
+            logger.warning(f"[LipReal] TencentApiAsr 初始化失败（可选功能）: {e}")
+            self.tencent_asr = None
+
+        self._asr_initialized = True
+        logger.info(f"[LipReal] ASR 初始化完成")
 
     # def __del__(self):
     #     logger.info(f'lipreal({self.sessionid}) delete')
@@ -362,6 +380,10 @@ class LipReal(BaseReal):
                 self.asr_audio_buffer = self.asr_audio_buffer[samples_needed:]
                 return audio_data
 
+        # 如果 ASR 未初始化或缓冲区为空，返回空数组
+        if self.lip_asr is None:
+            return np.array([], dtype=np.float32)
+
         # 如果缓冲区为空，从 LipASR 输出队列收集若干帧（每帧约20ms）
         frames_needed = int(duration_ms / 20)
         audio_frames = []
@@ -411,12 +433,17 @@ class LipReal(BaseReal):
         self.audio_track = audio_track
         self.loop = loop
 
+        # 🚀 延迟初始化 ASR 和 TTS（首次 render 时执行）
+        self._ensure_asr_initialized()
+        self._ensure_tts_initialized()
+
         # if self.opt.asr:
         #     self.asr.warm_up()
 
         self.init_customindex()
         # 传递音频轨道给TTS
-        self.tts.render(quit_event, audio_track, loop)
+        if self.tts:
+            self.tts.render(quit_event, audio_track, loop)
 
         # Flush any pending audio frames that were buffered before the audio track or its loop was ready
         try:
@@ -459,11 +486,12 @@ class LipReal(BaseReal):
             # audio stream thread...
             t = time.perf_counter()
             # 运行LipASR用于口型驱动的特征提取
-            self.lip_asr.run_step()
+            if self.lip_asr:
+                self.lip_asr.run_step()
 
             # 定期运行腾讯ASR进行文本识别
             asr_count += 1
-            if asr_count >= asr_interval:
+            if asr_count >= asr_interval and self.tencent_asr:
                 asr_count = 0
                 # 收集音频数据并运行腾讯ASR
                 try:

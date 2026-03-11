@@ -678,7 +678,7 @@ class DoubaoTTS(BaseTTS):
                 start_time = None
 
                 while self.state == State.RUNNING:
-                    result = conn.receive_audio_chunk(timeout=30.0)
+                    result = conn.receive_audio_chunk(timeout=5.0)
                     if result is None:
                         break
                     if isinstance(result, bytes) and len(result) == 0:
@@ -716,8 +716,12 @@ class DoubaoTTS(BaseTTS):
                                 first_chunk = False
                                 start_time = time.perf_counter()
 
+                            # 🆕 节流：控制发送速率为实时 (20ms/chunk)
                             self.parent.put_audio_frame(chunk, eventpoint)
                             total_sent += 1
+                            # 精确节流: 320 samples / 16000 Hz = 20ms
+                            chunk_duration = self.chunk / self.sample_rate
+                            time.sleep(chunk_duration)
 
                 self.connection_pool.return_connection(conn)
 
@@ -1144,10 +1148,29 @@ class DoubaoConnectionPool:
         return new_conn
 
     def return_connection(self, conn):
-        """归还连接 - 直接关闭（火山引擎TTS连接不可复用）"""
-        if conn:
+        """归还连接 - 健康连接复用，不健康连接才关闭并重新创建"""
+        if not conn:
+            return
+        
+        # 检查连接是否健康
+        if conn.is_healthy():
             try:
+                # 尝试归还到预热队列
+                self._ready_connections.put(conn, timeout=0.1)
+                logger.debug(f"[WS_POOL] 连接已归还到池中 (当前池大小: {self._ready_connections.qsize()})")
+                return
+            except:
+                # 队列满，关闭此连接
+                logger.debug("[WS_POOL] 连接池已满，关闭连接")
                 conn.close()
+        else:
+            logger.warning(f"[WS_POOL] 连接不健康 (error_count={conn.error_count})，关闭并重新创建")
+            conn.close()
+            # 尝试创建新连接补充池子
+            try:
+                new_conn = self._create_new_connection()
+                if new_conn:
+                    self._ready_connections.put(new_conn, timeout=0.5)
             except:
                 pass
 

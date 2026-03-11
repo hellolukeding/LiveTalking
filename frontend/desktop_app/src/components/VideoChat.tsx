@@ -15,6 +15,22 @@ import { negotiateOffer, sendHumanMessage } from '../api';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
 import Settings from './Settings';
 
+// ========== 对话状态机 ==========
+// 状态转换流程: IDLE -> LISTENING -> LLM_PROCESSING -> TTS_PLAYING -> LISTENING
+//                          ^______________________________| (循环)
+enum ConversationState {
+    IDLE = 'IDLE',                      // 空闲状态
+    LISTENING = 'LISTENING',            // 正在监听用户语音（ASR工作）
+    LLM_PROCESSING = 'LLM_PROCESSING',  // LLM正在处理（ASR暂停/缓冲）
+    TTS_PLAYING = 'TTS_PLAYING'         // AI正在说话（ASR暂停/缓冲）
+}
+
+// ASR 缓冲区结构（用于在LLM处理期间缓冲音频）
+interface ASRBuffer {
+    audioBlob: Blob;
+    timestamp: number;
+}
+
 export default function VideoChat() {
     const navigate = useNavigate();
     const [sessionId, setSessionId] = useState<string>('0');
@@ -36,21 +52,110 @@ export default function VideoChat() {
     const [isSpeakerOn, setIsSpeakerOn] = useState(true);
     const [isCameraOn, setIsCameraOn] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [isAISpeaking, setIsAISpeaking] = useState(false); // AI 是否正在说话
-    const isAISpeakingRef = useRef(false); // 用于在闭包中获取最新值
-    const recognitionRef = useRef<any>(null);
-    const aiSpeakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const micPermissionStreamRef = useRef<MediaStream | null>(null); // 用于权限检查的流
-    const isRequestingMicPermissionRef = useRef(false); // 防止重复请求麦克风权限
-    const mediaRecorderRef = useRef<MediaRecorder | null>(null); // 后端 ASR 录音器
-    const audioChunksRef = useRef<Blob[]>([]); // 音频数据缓存
-    const asrMimeTypeRef = useRef<string>('audio/webm'); // ASR 录音的 mimeType
-    const asrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // 定时发送音频
 
-    // 同步isAISpeaking状态到ref
+    // ========== 对话状态管理 ==========
+    const [conversationState, setConversationState] = useState<ConversationState>(ConversationState.IDLE);
+    const conversationStateRef = useRef<ConversationState>(ConversationState.IDLE);
+    const aiSpeakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const llmProcessingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // ASR 相关
+    const recognitionRef = useRef<any>(null);
+    const micPermissionStreamRef = useRef<MediaStream | null>(null);
+    const isRequestingMicPermissionRef = useRef(false);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const asrMimeTypeRef = useRef<string>('audio/webm');
+    const asrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const asrBufferRef = useRef<ASRBuffer[]>([]);  // ASR 缓冲区
+    const asrFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // 兼容旧的 isAISpeaking（用于UI显示）
+    const isAISpeaking = conversationState === ConversationState.TTS_PLAYING;
+
+    // ========== 同步状态到 ref（用于闭包访问） ==========
     useEffect(() => {
-        isAISpeakingRef.current = isAISpeaking;
-    }, [isAISpeaking]);
+        conversationStateRef.current = conversationState;
+        console.log('[State] Conversation state:', conversationState);
+    }, [conversationState]);
+
+    // ========== 状态转换函数 ==========
+    const setStateListening = () => {
+        console.log('[State] -> LISTENING (ASR enabled)');
+        setConversationState(ConversationState.LISTENING);
+    };
+
+    const setStateLLMProcessing = () => {
+        console.log('[State] -> LLM_PROCESSING (ASR paused, buffering enabled)');
+        setConversationState(ConversationState.LLM_PROCESSING);
+        // 设置超时保护，如果30秒没有响应，回到监听状态
+        if (llmProcessingTimeoutRef.current) {
+            clearTimeout(llmProcessingTimeoutRef.current);
+        }
+        llmProcessingTimeoutRef.current = setTimeout(() => {
+            console.warn('[State] LLM processing timeout, returning to LISTENING');
+            setStateListening();
+        }, 30000);
+    };
+
+    const setStateTTSPlaying = () => {
+        console.log('[State] -> TTS_PLAYING (ASR paused, buffering enabled)');
+        setConversationState(ConversationState.TTS_PLAYING);
+        // 清除 LLM 超时
+        if (llmProcessingTimeoutRef.current) {
+            clearTimeout(llmProcessingTimeoutRef.current);
+        }
+        // 重置并设置超时保护（1秒后如果没有新消息，则认为AI停止说话）
+        if (aiSpeakingTimeoutRef.current) {
+            clearTimeout(aiSpeakingTimeoutRef.current);
+        }
+        aiSpeakingTimeoutRef.current = setTimeout(() => {
+            console.log('[State] AI stopped speaking (timeout 1s)');
+            setStateListening();
+        }, 1000);
+    };
+
+    const extendTTSPlaying = () => {
+        // 延长 TTS 播放状态（在收到新的AI消息时调用）
+        if (conversationStateRef.current === ConversationState.TTS_PLAYING) {
+            if (aiSpeakingTimeoutRef.current) {
+                clearTimeout(aiSpeakingTimeoutRef.current);
+            }
+            aiSpeakingTimeoutRef.current = setTimeout(() => {
+                console.log('[State] AI stopped speaking (timeout 1s after extend)');
+                setStateListening();
+            }, 1000);
+        }
+    };
+
+    // ========== 清理定时器 ==========
+    useEffect(() => {
+        return () => {
+            if (aiSpeakingTimeoutRef.current) {
+                clearTimeout(aiSpeakingTimeoutRef.current);
+            }
+            if (llmProcessingTimeoutRef.current) {
+                clearTimeout(llmProcessingTimeoutRef.current);
+            }
+            if (asrFlushTimerRef.current) {
+                clearTimeout(asrFlushTimerRef.current);
+            }
+        };
+    }, []);
+
+    // ========== ASR 缓冲区管理 ==========
+    const flushASRBuffer = async () => {
+        if (asrBufferRef.current.length === 0) return;
+
+        console.log('[ASR] Flushing buffer, count:', asrBufferRef.current.length);
+        const buffers = [...asrBufferRef.current];
+        asrBufferRef.current = [];
+
+        // 只处理最近的音频（避免处理太多旧的音频）
+        if (buffers.length > 0) {
+            const latestBuffer = buffers[buffers.length - 1];
+            await sendAudioToBackend(latestBuffer.audioBlob);
+        }
+    };
 
     // 格式化通话时长
     const formatDuration = (seconds: number) => {
@@ -221,8 +326,8 @@ export default function VideoChat() {
             };
 
             mediaRecorder.onstop = async () => {
-                // 当录音停止时，发送收集的数据
-                if (recordingChunks.length > 0 && !isAISpeakingRef.current) {
+                // 当录音停止时，根据当前状态处理音频
+                if (recordingChunks.length > 0) {
                     const audioBlob = new Blob(recordingChunks, { type: selectedMimeType });
                     recordingChunks = []; // 清空缓存
 
@@ -232,9 +337,27 @@ export default function VideoChat() {
                     const hexString = Array.from(debugBytes).map(b => b.toString(16).padStart(2, '0')).join('');
                     console.log('[ASR] Blob first 50 bytes (hex):', hexString);
                     console.log('[ASR] Blob size:', audioBlob.size, 'type:', audioBlob.type);
+                    console.log('[ASR] Current state:', conversationStateRef.current);
 
-                    // 发送到后端
-                    await sendAudioToBackend(audioBlob);
+                    // ========== 状态机处理逻辑 ==========
+                    if (conversationStateRef.current === ConversationState.LISTENING) {
+                        // 正在监听状态，直接发送识别
+                        console.log('[ASR] State=LISTENING, sending for recognition');
+                        await sendAudioToBackend(audioBlob);
+                    } else if (conversationStateRef.current === ConversationState.LLM_PROCESSING ||
+                               conversationStateRef.current === ConversationState.TTS_PLAYING) {
+                        // LLM处理或AI说话中，缓冲音频
+                        console.log('[ASR] State=' + conversationStateRef.current + ', buffering audio');
+                        asrBufferRef.current.push({
+                            audioBlob: audioBlob,
+                            timestamp: Date.now()
+                        });
+                        // 限制缓冲区大小（最多保存5个片段）
+                        if (asrBufferRef.current.length > 5) {
+                            asrBufferRef.current.shift();
+                        }
+                    }
+                    // IDLE状态不处理音频
                 }
 
                 // 如果仍在运行，重新开始录音（除非正在被停止）
@@ -270,6 +393,9 @@ export default function VideoChat() {
                     mediaRecorderRef.current.stop();
                 }
             }, 2000);
+
+            // 设置初始状态为 LISTENING
+            setStateListening();
 
             console.log('[ASR] Backend Tencent ASR started');
             message.info('语音识别已启动（使用腾讯 ASR）');
@@ -324,16 +450,11 @@ export default function VideoChat() {
     };
 
     // 发送音频到后端进行识别（保留这个函数以防被其他地方调用）
-    const sendAudioForRecognition = async () => {
-        // 这个函数不再使用，因为录音逻辑已经改变
-        return;
-    };
-
     // 停止后端 ASR
     const stopBackendASR = () => {
-        // 发送剩余的音频
-        if (audioChunksRef.current.length > 0 && !isAISpeakingRef.current) {
-            sendAudioForRecognition();
+        // 发送剩余的缓冲音频
+        if (asrBufferRef.current.length > 0) {
+            flushASRBuffer();
         }
 
         // 停止定时器
@@ -373,20 +494,18 @@ export default function VideoChat() {
         }
     };
 
-    // 标记AI开始说话（由data channel消息触发）
+    // ========== 标记AI开始说话（由data channel消息触发） ==========
     const markAISpeaking = () => {
-        setIsAISpeaking(true);
-
-        // 清除之前的定时器
-        if (aiSpeakingTimeoutRef.current) {
-            clearTimeout(aiSpeakingTimeoutRef.current);
+        // 如果当前是 LLM_PROCESSING 状态，转换到 TTS_PLAYING
+        // 如果已经是 TTS_PLAYING，延长超时时间
+        if (conversationStateRef.current === ConversationState.LLM_PROCESSING) {
+            setStateTTSPlaying();
+        } else if (conversationStateRef.current === ConversationState.TTS_PLAYING) {
+            extendTTSPlaying();
+        } else {
+            // 其他状态也转换为 TTS_PLAYING
+            setStateTTSPlaying();
         }
-
-        // 500ms后如果没有新消息，则认为AI停止说话
-        aiSpeakingTimeoutRef.current = setTimeout(() => {
-            console.log('[AEC] AI stopped speaking (no new messages for 500ms)');
-            setIsAISpeaking(false);
-        }, 500);
     };
 
     const start = async () => {
@@ -531,11 +650,16 @@ export default function VideoChat() {
             timestamp: Date.now()
         }]);
 
+        // 设置状态为 LLM_PROCESSING（ASR将暂停并缓冲音频）
+        setStateLLMProcessing();
+
         try {
             await sendHumanMessage(text, sessionId);
         } catch (e) {
             console.error(e);
             message.error('发送失败');
+            // 发送失败，回到监听状态
+            setStateListening();
         }
     };
 
@@ -599,9 +723,15 @@ export default function VideoChat() {
     useEffect(() => {
         return () => {
             stop();
-            // 清理AI说话定时器
+            // 清理所有定时器
             if (aiSpeakingTimeoutRef.current) {
                 clearTimeout(aiSpeakingTimeoutRef.current);
+            }
+            if (llmProcessingTimeoutRef.current) {
+                clearTimeout(llmProcessingTimeoutRef.current);
+            }
+            if (asrFlushTimerRef.current) {
+                clearTimeout(asrFlushTimerRef.current);
             }
             // 清理后端 ASR 资源
             stopBackendASR();

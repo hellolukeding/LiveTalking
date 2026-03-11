@@ -82,6 +82,20 @@ export default function VideoChat() {
     const setStateListening = () => {
         console.log('[State] -> LISTENING (ASR enabled)');
         setConversationState(ConversationState.LISTENING);
+        
+        // 处理缓冲的音频（从LLM_PROCESSING或TTS_PLAYING状态转换过来时）
+        if (asrBufferRef.current.length > 0) {
+            const buffers = [...asrBufferRef.current];
+            asrBufferRef.current = [];
+            console.log('[State] Processing buffered audio:', buffers.length, 'chunks');
+            
+            // 合并所有缓冲的音频片段
+            const sortedBuffers = buffers.sort((a, b) => a.timestamp - b.timestamp);
+            const mergedBlob = new Blob(sortedBuffers.map(b => b.audioBlob), { type: 'audio/webm' });
+            
+            // 发送识别
+            sendAudioToBackend(mergedBlob);
+        }
     };
 
     const setStateLLMProcessing = () => {
@@ -150,14 +164,13 @@ export default function VideoChat() {
         const buffers = [...asrBufferRef.current];
         asrBufferRef.current = [];
 
-        // 合并所有缓冲的音频片段，而不是只处理最新的
+        // 只处理最近的音频（避免处理太多旧的音频）
         if (buffers.length > 0) {
-            const sortedBuffers = buffers.sort((a, b) => a.timestamp - b.timestamp);
-            const mergedBlob = new Blob(sortedBuffers.map(b => b.audioBlob), { type: 'audio/webm' });
-            console.log('[ASR] Merged buffer size:', mergedBlob.size, 'from', sortedBuffers.length, 'chunks');
-            await sendAudioToBackend(mergedBlob);
+            const latestBuffer = buffers[buffers.length - 1];
+            await sendAudioToBackend(latestBuffer.audioBlob);
         }
     };
+
     // 格式化通话时长
     const formatDuration = (seconds: number) => {
         const mins = Math.floor(seconds / 60);
@@ -332,19 +345,35 @@ export default function VideoChat() {
                     const audioBlob = new Blob(recordingChunks, { type: selectedMimeType });
                     recordingChunks = []; // 清空缓存
 
-                    // Debug: 检查 Blob 的前几个字节
-                    const debugBuffer = await audioBlob.slice(0, 50).arrayBuffer();
-                    const debugBytes = new Uint8Array(debugBuffer);
-                    const hexString = Array.from(debugBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-                    console.log('[ASR] Blob first 50 bytes (hex):', hexString);
-                    console.log('[ASR] Blob size:', audioBlob.size, 'type:', audioBlob.type);
-                    console.log('[ASR] Current state:', conversationStateRef.current);
+                    console.log('[ASR] Blob size:', audioBlob.size, 'type:', audioBlob.type, 'state:', conversationStateRef.current);
 
                     // ========== 状态机处理逻辑 ==========
                     if (conversationStateRef.current === ConversationState.LISTENING) {
-                        // 正在监听状态，直接发送识别
-                        console.log('[ASR] State=LISTENING, sending for recognition');
-                        await sendAudioToBackend(audioBlob);
+                        // 在LISTENING状态下累积音频，等待静音后再发送
+                        asrBufferRef.current.push({
+                            audioBlob: audioBlob,
+                            timestamp: Date.now()
+                        });
+                        
+                        // 清除之前的静音检测定时器
+                        if (asrFlushTimerRef.current) {
+                            clearTimeout(asrFlushTimerRef.current);
+                        }
+                        
+                        // 设置新的静音检测定时器（1000ms无新音频则发送识别）
+                        asrFlushTimerRef.current = setTimeout(async () => {
+                            if (asrBufferRef.current.length > 0) {
+                                const buffers = [...asrBufferRef.current];
+                                asrBufferRef.current = [];
+                                
+                                // 合并所有累积的音频片段
+                                const sortedBuffers = buffers.sort((a, b) => a.timestamp - b.timestamp);
+                                const mergedBlob = new Blob(sortedBuffers.map(b => b.audioBlob), { type: selectedMimeType });
+                                console.log('[ASR] Silence detected, sending merged audio:', mergedBlob.size, 'bytes from', sortedBuffers.length, 'chunks');
+                                await sendAudioToBackend(mergedBlob);
+                            }
+                        }, 1000);
+                        
                     } else if (conversationStateRef.current === ConversationState.LLM_PROCESSING ||
                                conversationStateRef.current === ConversationState.TTS_PLAYING) {
                         // LLM处理或AI说话中，缓冲音频
@@ -353,8 +382,8 @@ export default function VideoChat() {
                             audioBlob: audioBlob,
                             timestamp: Date.now()
                         });
-                        // 限制缓冲区大小（最多保存5个片段）
-                        if (asrBufferRef.current.length > 5) {
+                        // 限制缓冲区大小（最多保存10个片段）
+                        if (asrBufferRef.current.length > 10) {
                             asrBufferRef.current.shift();
                         }
                     }
@@ -393,7 +422,7 @@ export default function VideoChat() {
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
                     mediaRecorderRef.current.stop();
                 }
-            }, 1000);
+            }, 2000);
 
             // 设置初始状态为 LISTENING
             setStateListening();

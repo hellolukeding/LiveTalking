@@ -150,13 +150,14 @@ export default function VideoChat() {
         const buffers = [...asrBufferRef.current];
         asrBufferRef.current = [];
 
-        // 只处理最近的音频（避免处理太多旧的音频）
+        // 合并所有缓冲的音频片段，而不是只处理最新的
         if (buffers.length > 0) {
-            const latestBuffer = buffers[buffers.length - 1];
-            await sendAudioToBackend(latestBuffer.audioBlob);
+            const sortedBuffers = buffers.sort((a, b) => a.timestamp - b.timestamp);
+            const mergedBlob = new Blob(sortedBuffers.map(b => b.audioBlob), { type: 'audio/webm' });
+            console.log('[ASR] Merged buffer size:', mergedBlob.size, 'from', sortedBuffers.length, 'chunks');
+            await sendAudioToBackend(mergedBlob);
         }
     };
-
     // 格式化通话时长
     const formatDuration = (seconds: number) => {
         const mins = Math.floor(seconds / 60);
@@ -392,7 +393,7 @@ export default function VideoChat() {
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
                     mediaRecorderRef.current.stop();
                 }
-            }, 2000);
+            }, 1000);
 
             // 设置初始状态为 LISTENING
             setStateListening();

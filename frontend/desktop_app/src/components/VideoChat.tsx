@@ -89,15 +89,14 @@ export default function VideoChat() {
             asrBufferRef.current = [];
             console.log('[State] Processing buffered audio:', buffers.length, 'chunks');
             
-            // 合并所有缓冲的音频片段
-            const sortedBuffers = buffers.sort((a, b) => a.timestamp - b.timestamp);
-            const mergedBlob = new Blob(sortedBuffers.map(b => b.audioBlob), { type: 'audio/webm' });
+            // 发送最大的音频片段（WebM不能简单合并）
+            const largestBuffer = buffers.reduce((max, b) => b.audioBlob.size > max.audioBlob.size ? b : max);
+            console.log('[State] Sending largest buffered audio:', largestBuffer.audioBlob.size, 'bytes');
             
             // 发送识别
-            sendAudioToBackend(mergedBlob);
+            sendAudioToBackend(largestBuffer.audioBlob);
         }
     };
-
     const setStateLLMProcessing = () => {
         console.log('[State] -> LLM_PROCESSING (ASR paused, buffering enabled)');
         setConversationState(ConversationState.LLM_PROCESSING);
@@ -366,11 +365,10 @@ export default function VideoChat() {
                                 const buffers = [...asrBufferRef.current];
                                 asrBufferRef.current = [];
                                 
-                                // 合并所有累积的音频片段
-                                const sortedBuffers = buffers.sort((a, b) => a.timestamp - b.timestamp);
-                                const mergedBlob = new Blob(sortedBuffers.map(b => b.audioBlob), { type: selectedMimeType });
-                                console.log('[ASR] Silence detected, sending merged audio:', mergedBlob.size, 'bytes from', sortedBuffers.length, 'chunks');
-                                await sendAudioToBackend(mergedBlob);
+                                // 发送最大的音频片段（而不是合并，因为WebM不能简单拼接）
+                                const largestBuffer = buffers.reduce((max, b) => b.audioBlob.size > max.audioBlob.size ? b : max);
+                                console.log('[ASR] Silence detected, sending largest audio:', largestBuffer.audioBlob.size, 'bytes from', buffers.length, 'chunks');
+                                await sendAudioToBackend(largestBuffer.audioBlob);
                             }
                         }, 1000);
                         

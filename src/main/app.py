@@ -618,6 +618,61 @@ async def is_speaking(request):
     )
 
 
+async def speech_recognize(request):
+    """使用腾讯 ASR 进行语音识别"""
+    try:
+        # 获取音频数据
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            form = await request.post()
+            fileobj = form.get("audio")
+            if not fileobj:
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({"code": -1, "msg": "No audio file provided"}),
+                    status=400
+                )
+            audio_bytes = fileobj.file.read()
+        else:
+            # JSON 请求，期望 base64 编码的音频
+            data = await request.json()
+            audio_base64 = data.get("audio")
+            if not audio_base64:
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({"code": -1, "msg": "No audio data provided"}),
+                    status=400
+                )
+            audio_bytes = base64.b64decode(audio_base64)
+
+        # 使用腾讯 ASR 进行识别
+        from tencentasr import TencentApiAsr
+
+        # 创建临时配置对象
+        class TempOpt:
+            pass
+
+        asr = TencentApiAsr(TempOpt())
+        transcript = await asr.recognize(audio_bytes)
+
+        logger.debug(f"[ASR] Tencent ASR result: {transcript}")
+
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({
+                "code": 0,
+                "data": {"text": transcript}
+            }),
+        )
+
+    except Exception as e:
+        logger.error(f"[ASR] Speech recognition error: {str(e)}", exc_info=True)
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+            status=500
+        )
+
+
 async def on_shutdown(app):
     # 关闭对等连接
     coros = [pc.close() for pc in pcs]
@@ -779,6 +834,7 @@ if __name__ == '__main__':
     appasync.router.add_post("/record", record)
     appasync.router.add_post("/interrupt_talk", interrupt_talk)
     appasync.router.add_post("/is_speaking", is_speaking)
+    appasync.router.add_post("/speech_recognize", speech_recognize)
     appasync.router.add_static('/', path='frontend/web')
 
     # 配置默认CORS设置

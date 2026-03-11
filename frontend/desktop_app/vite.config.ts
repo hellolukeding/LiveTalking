@@ -36,6 +36,10 @@ export default defineConfig(async () => ({
       '/record': 'http://localhost:8010',
       '/is_speaking': 'http://localhost:8010',
       '/avatars': 'http://localhost:8010',
+      '/speech_recognize': 'http://localhost:8010',
+      '/humanaudio': 'http://localhost:8010',
+      '/interrupt_talk': 'http://localhost:8010',
+      '/set_audiotype': 'http://localhost:8010',
     },
   },
 }));

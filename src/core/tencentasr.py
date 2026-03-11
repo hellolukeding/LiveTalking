@@ -238,12 +238,75 @@ class TencentApiAsr(BaseASR):
 
     def _convert_audio_format(self, audio_bytes: bytes) -> bytes:
         """Convert audio to WAV format if needed"""
+        # Debug: log first 50 bytes to identify format (use INFO level to ensure visibility)
+        logger.info(f"[ASR] Audio bytes received: len={len(audio_bytes)}, first 50 bytes: {audio_bytes[:50].hex()}")
+        # Also log as ASCII to see if it's text/base64
+        try:
+            ascii_preview = audio_bytes[:50].decode('ascii', errors='replace')
+            logger.info(f"[ASR] Audio bytes ASCII preview: {repr(ascii_preview)}")
+        except:
+            pass
+
+        # Save to temp file for analysis
+        try:
+            import time
+            current_file = f"/tmp/asr_audio_{int(time.time())}.bin"
+            with open(current_file, 'wb') as f:
+                f.write(audio_bytes)
+            logger.info(f"[ASR] Saved raw audio to: {current_file}")
+        except Exception as save_err:
+            logger.warning(f"[ASR] Could not save debug file: {save_err}")
+
+        # Save to temp file for analysis
+        try:
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.bin', delete=False, dir='/tmp') as f:
+                f.write(audio_bytes)
+                logger.info(f"[ASR] Saved audio to: {f.name} for analysis")
+        except Exception as e:
+            logger.warning(f"[ASR] Failed to save temp file: {e}")
+
         # Check if it's already WAV
         def _is_wav(b: bytes) -> bool:
             return len(b) >= 12 and b[0:4] == b"RIFF" and b[8:12] == b"WAVE"
 
         def _is_mp3(b: bytes) -> bool:
             return len(b) >= 3 and (b[0:3] == b"ID3" or (b[0] == 0xFF and (b[1] & 0xE0) == 0xE0))
+
+        def _is_webm(b: bytes) -> bool:
+            """Check if bytes are WebM/Matroska format (EBML container)"""
+            return len(b) >= 4 and b[0:4] == b'\x1a\x45\xdf\xa3'
+
+        def _is_ogg(b: bytes) -> bool:
+            """Check if bytes are OGG format"""
+            return len(b) >= 4 and b[0:4] == b'OggS'
+
+        def _is_mp4(b: bytes) -> bool:
+            """Check if bytes are MP4/M4A format (starts with ftyp box)"""
+            if len(b) < 12:
+                return False
+            # Check for ftyp box at various offsets
+            for offset in [0, 4]:
+                if len(b) > offset + 8 and b[offset:offset+4] == b'ftyp':
+                    return True
+            return False
+
+        # Check WebM first (browser MediaRecorder typically outputs this)
+        if _is_webm(audio_bytes):
+            logger.info("[ASR] Detected WebM input; converting to WAV for Tencent ASR")
+            try:
+                from io import BytesIO
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(BytesIO(audio_bytes))
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                out = BytesIO()
+                audio.export(out, format="wav")
+                wav_bytes = out.getvalue()
+                logger.info(f"[ASR] Converted WebM -> WAV, size={len(wav_bytes)} bytes")
+                return wav_bytes
+            except Exception as e:
+                logger.error(f"[ASR] Failed to convert WebM to WAV: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to convert WebM to WAV for Tencent ASR: {str(e)}")
 
         if _is_mp3(audio_bytes):
             logger.debug(
@@ -294,9 +357,22 @@ class TencentApiAsr(BaseASR):
                     f"[ASR] Failed to inspect/convert WAV input: {e}; will send as-is")
                 return audio_bytes
         else:
-            logger.warning(
-                "[ASR] Unknown audio format detected; Tencent ASR may reject the audio")
-            return audio_bytes
+            # Unknown format - try pydub's generic file loader which can handle many formats
+            logger.info(f"[ASR] Unknown audio format detected (first bytes: {audio_bytes[:20].hex()}); trying generic conversion")
+            try:
+                from io import BytesIO
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(BytesIO(audio_bytes))
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                out = BytesIO()
+                audio.export(out, format="wav")
+                wav_bytes = out.getvalue()
+                logger.info(f"[ASR] Generic conversion succeeded, output size={len(wav_bytes)} bytes")
+                return wav_bytes
+            except Exception as e:
+                logger.error(f"[ASR] Generic audio conversion failed: {e}", exc_info=True)
+                # Last resort: return as-is and let Tencent ASR handle it
+                return audio_bytes
 
     def _pcm_to_wav_bytes(self, audio_array, sample_rate: int = 16000) -> bytes:
         """
@@ -701,6 +777,27 @@ class TencentApiAsrLegacy:
         def _is_mp3(b: bytes) -> bool:
             return len(b) >= 3 and (b[0:3] == b"ID3" or (b[0] == 0xFF and (b[1] & 0xE0) == 0xE0))
 
+        def _is_webm(b: bytes) -> bool:
+            """Check if bytes are WebM/Matroska format (EBML container)"""
+            return len(b) >= 4 and b[0:4] == b'\x1a\x45\xdf\xa3'
+
+        # Check WebM first (browser MediaRecorder typically outputs this)
+        if _is_webm(audio_bytes):
+            logger.info("[ASR] Detected WebM input; converting to WAV for Tencent ASR")
+            try:
+                from io import BytesIO
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(BytesIO(audio_bytes))
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                out = BytesIO()
+                audio.export(out, format="wav")
+                wav_bytes = out.getvalue()
+                logger.info(f"[ASR] Converted WebM -> WAV, size={len(wav_bytes)} bytes")
+                return wav_bytes
+            except Exception as e:
+                logger.error(f"[ASR] Failed to convert WebM to WAV: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to convert WebM to WAV for Tencent ASR: {str(e)}")
+
         if _is_mp3(audio_bytes):
             try:
                 from io import BytesIO
@@ -733,7 +830,21 @@ class TencentApiAsrLegacy:
             except Exception as e:
                 return audio_bytes
         else:
-            return audio_bytes
+            # Unknown format - try pydub's generic file loader which can handle many formats
+            logger.warning(f"[ASR] Unknown audio format detected (first bytes: {audio_bytes[:20].hex()}); trying generic conversion")
+            try:
+                from io import BytesIO
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(BytesIO(audio_bytes))
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                out = BytesIO()
+                audio.export(out, format="wav")
+                wav_bytes = out.getvalue()
+                logger.debug(f"[ASR] Generic conversion succeeded, output size={len(wav_bytes)} bytes")
+                return wav_bytes
+            except Exception as e:
+                logger.error(f"[ASR] Generic audio conversion failed: {e}", exc_info=True)
+                return audio_bytes
 
 
 # Register with the system (if applicable)

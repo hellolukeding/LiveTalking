@@ -41,6 +41,11 @@ export default function VideoChat() {
     const recognitionRef = useRef<any>(null);
     const aiSpeakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const micPermissionStreamRef = useRef<MediaStream | null>(null); // 用于权限检查的流
+    const isRequestingMicPermissionRef = useRef(false); // 防止重复请求麦克风权限
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null); // 后端 ASR 录音器
+    const audioChunksRef = useRef<Blob[]>([]); // 音频数据缓存
+    const asrMimeTypeRef = useRef<string>('audio/webm'); // ASR 录音的 mimeType
+    const asrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // 定时发送音频
 
     // 同步isAISpeaking状态到ref
     useEffect(() => {
@@ -75,15 +80,23 @@ export default function VideoChat() {
 
     useEffect(() => {
         if (isVoiceChatOn && isStarted) {
-            const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-            if (!SpeechRecognition) {
-                message.error('您的浏览器不支持语音识别');
-                setIsVoiceChatOn(false);
+            // 防止重复请求
+            if (isRequestingMicPermissionRef.current) {
+                console.log('[ASR] Already requesting microphone permission, skipping...');
                 return;
             }
+            isRequestingMicPermissionRef.current = true;
 
             // 先请求麦克风权限（确保触发权限提示）
-            message.loading({ content: '正在请求麦克风权限...', key: 'micPermission', duration: 0 });
+            message.loading({ content: '正在请求麦克风权限...', key: 'micPermission', duration: 10 });
+
+            // 检查 mediaDevices 是否可用（需要 HTTPS 或 localhost）
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                message.error({ content: '麦克风不可用：需要通过 HTTPS 或 localhost 访问', key: 'micPermission', duration: 5 });
+                setIsVoiceChatOn(false);
+                isRequestingMicPermissionRef.current = false;
+                return;
+            }
 
             // 先枚举可用的音频设备，帮助诊断问题
             navigator.mediaDevices.enumerateDevices()
@@ -120,19 +133,18 @@ export default function VideoChat() {
                     return navigator.mediaDevices.getUserMedia({ audio: true });
                 })
                 .then((stream) => {
+                    isRequestingMicPermissionRef.current = false; // 重置请求状态
                     message.success({ content: '麦克风权限已授予', key: 'micPermission', duration: 2 });
                     console.log('[ASR] Microphone permission granted');
 
-                    // 保存流引用，用于后续清理
+                    // 保存流引用，用于录音
                     micPermissionStreamRef.current = stream;
 
-                    // 立即停止音频轨道（我们只需要权限，不需要实际的音频流）
-                    stream.getTracks().forEach(track => track.stop());
-
-                    // 权限获取成功后，启动语音识别
-                    initSpeechRecognition();
+                    // 启动后端腾讯 ASR
+                    initBackendASR(stream);
                 })
                 .catch((err: any) => {
+                    isRequestingMicPermissionRef.current = false; // 重置请求状态
                     setIsVoiceChatOn(false);
 
                     // 根据不同的错误类型提供不同的提示
@@ -154,92 +166,201 @@ export default function VideoChat() {
                     console.error('[ASR] Microphone permission denied:', err);
                 });
         } else {
-            if (recognitionRef.current) {
-                recognitionRef.current.stop();
-                recognitionRef.current = null;
-                console.log('[ASR] Speech recognition stopped');
-            }
-            // 清理权限检查的流
-            if (micPermissionStreamRef.current) {
-                micPermissionStreamRef.current.getTracks().forEach(track => track.stop());
-                micPermissionStreamRef.current = null;
-            }
+            // 停止后端 ASR
+            stopBackendASR();
         }
 
         return () => {
-            if (recognitionRef.current) {
-                recognitionRef.current.stop();
-                recognitionRef.current = null;
-            }
-            // 清理权限检查的流
-            if (micPermissionStreamRef.current) {
-                micPermissionStreamRef.current.getTracks().forEach(track => track.stop());
-                micPermissionStreamRef.current = null;
-            }
+            stopBackendASR();
         };
-    }, [isVoiceChatOn, isStarted]); // 移除 isAISpeaking 依赖
+    }, [isVoiceChatOn, isStarted]);
 
-    // 初始化语音识别
-    const initSpeechRecognition = () => {
-        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = false;
-        recognition.lang = 'zh-CN';
+    // 初始化后端腾讯 ASR
+    const initBackendASR = (stream: MediaStream) => {
+        try {
+            // 检测支持的音频格式
+            const mimeTypes = [
+                'audio/webm;codecs=opus',
+                'audio/webm',
+                'audio/ogg;codecs=opus',
+                'audio/ogg',
+                'audio/mp4',
+            ];
 
-        recognition.onresult = (event: any) => {
-            // AI 正在说话时，忽略识别结果（使用ref获取最新值）
-            if (isAISpeakingRef.current) {
-                console.log('[ASR] AI is speaking, ignoring input');
+            let selectedMimeType = '';
+            for (const mimeType of mimeTypes) {
+                if (MediaRecorder.isTypeSupported(mimeType)) {
+                    selectedMimeType = mimeType;
+                    console.log('[ASR] Using mimeType:', mimeType);
+                    break;
+                }
+            }
+
+            if (!selectedMimeType) {
+                console.error('[ASR] No supported audio mimeType found');
+                message.error('浏览器不支持音频录制');
+                setIsVoiceChatOn(false);
                 return;
             }
 
-            const last = event.results.length - 1;
-            const text = event.results[last][0].transcript;
-            if (text && text.trim()) {
-                console.log('[ASR] Recognized:', text);
-                handleSendMessage(text.trim());
-            }
-        };
+            // 使用 MediaRecorder 录制音频
+            const mediaRecorder = new MediaRecorder(stream, {
+                mimeType: selectedMimeType,
+            });
 
-        recognition.onerror = (event: any) => {
-            console.error('[ASR] Speech recognition error:', event.error);
-            if (event.error === 'not-allowed') {
-                message.error('语音识别权限被拒绝，请在浏览器设置中允许麦克风权限', 5);
-                message.warning('请点击浏览器地址栏左侧的锁图标，允许麦克风访问', 6);
-                setIsVoiceChatOn(false);
-            } else if (event.error === 'no-speech') {
-                // 忽略无语音错误，继续监听
-                console.log('[ASR] No speech detected, continuing...');
-            } else if (event.error === 'network') {
-                console.error('[ASR] Network error, will retry...');
-            } else if (event.error === 'aborted') {
-                console.log('[ASR] Recognition aborted');
-            } else {
-                console.warn('[ASR] Unhandled recognition error:', event.error);
-            }
-        };
+            // 记录实际使用的 mimeType
+            console.log('[ASR] MediaRecorder actual mimeType:', mediaRecorder.mimeType);
 
-        recognition.onend = () => {
-            // 如果麦克风开启且服务已连接，则自动重启（持续监听）
-            if (isVoiceChatOn && isStarted && recognitionRef.current) {
-                try {
-                    recognition.start();
-                } catch (e) {
-                    console.error('[ASR] Failed to restart recognition:', e);
+            // 收集录音数据
+            let recordingChunks: BlobPart[] = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordingChunks.push(event.data);
                 }
-            }
-        };
+            };
 
-        try {
-            recognition.start();
-            recognitionRef.current = recognition;
-            console.log('[ASR] Speech recognition started');
+            mediaRecorder.onstop = async () => {
+                // 当录音停止时，发送收集的数据
+                if (recordingChunks.length > 0 && !isAISpeakingRef.current) {
+                    const audioBlob = new Blob(recordingChunks, { type: selectedMimeType });
+                    recordingChunks = []; // 清空缓存
+
+                    // Debug: 检查 Blob 的前几个字节
+                    const debugBuffer = await audioBlob.slice(0, 50).arrayBuffer();
+                    const debugBytes = new Uint8Array(debugBuffer);
+                    const hexString = Array.from(debugBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                    console.log('[ASR] Blob first 50 bytes (hex):', hexString);
+                    console.log('[ASR] Blob size:', audioBlob.size, 'type:', audioBlob.type);
+
+                    // 发送到后端
+                    await sendAudioToBackend(audioBlob);
+                }
+
+                // 如果仍在运行，重新开始录音（除非正在被停止）
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && isVoiceChatOn) {
+                    // 延迟一点再开始，避免连续录制
+                    setTimeout(() => {
+                        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+                            recordingChunks = [];
+                            mediaRecorderRef.current.start();
+                        }
+                    }, 100);
+                }
+            };
+
+            // 保存引用和 mimeType
+            mediaRecorderRef.current = mediaRecorder;
+            asrMimeTypeRef.current = selectedMimeType;
+
+            // 开始录音，每 2 秒停止并重新开始
+            const startRecording = () => {
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+                    recordingChunks = [];
+                    mediaRecorderRef.current.start();
+                }
+            };
+
+            // 第一次开始录音
+            startRecording();
+
+            // 每 2 秒停止录音（触发 onstop，然后自动重新开始）
+            asrIntervalRef.current = setInterval(() => {
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                    mediaRecorderRef.current.stop();
+                }
+            }, 2000);
+
+            console.log('[ASR] Backend Tencent ASR started');
+            message.info('语音识别已启动（使用腾讯 ASR）');
         } catch (e) {
-            console.error('[ASR] Failed to start recognition:', e);
-            message.error('无法开启语音识别');
+            console.error('[ASR] Failed to start backend ASR:', e);
+            message.error('无法启动语音识别');
             setIsVoiceChatOn(false);
         }
+    };
+
+    // 发送音频到后端
+    const sendAudioToBackend = async (audioBlob: Blob) => {
+        try {
+            // 转换为 base64
+            const reader = new FileReader();
+            reader.onloadend = async () => {
+                try {
+                    const base64Audio = (reader.result as string).split(',')[1];
+                    // Debug: 检查 base64 的前几个字符
+                    console.log('[ASR] Base64 first 20 chars:', base64Audio?.substring(0, 20));
+
+                    // 发送到后端 - 使用 LiveTalking API 端口 8010
+                    const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
+                        || `${window.location.protocol}//${window.location.hostname}:8010`;
+                    const response = await fetch(`${apiBaseUrl}/speech_recognize`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ audio: base64Audio }),
+                    });
+
+                    const result = await response.json();
+
+                    if (result.code === 0 && result.data?.text) {
+                        const text = result.data.text.trim();
+                        if (text) {
+                            console.log('[ASR] Tencent ASR recognized:', text);
+                            handleSendMessage(text);
+                        }
+                    } else if (result.code !== 0) {
+                        console.warn('[ASR] Recognition failed:', result.msg);
+                    }
+                } catch (e) {
+                    console.error('[ASR] Failed to process recognition result:', e);
+                }
+            };
+            reader.readAsDataURL(audioBlob);
+        } catch (e) {
+            console.error('[ASR] Failed to send audio for recognition:', e);
+        }
+    };
+
+    // 发送音频到后端进行识别（保留这个函数以防被其他地方调用）
+    const sendAudioForRecognition = async () => {
+        // 这个函数不再使用，因为录音逻辑已经改变
+        return;
+    };
+
+    // 停止后端 ASR
+    const stopBackendASR = () => {
+        // 发送剩余的音频
+        if (audioChunksRef.current.length > 0 && !isAISpeakingRef.current) {
+            sendAudioForRecognition();
+        }
+
+        // 停止定时器
+        if (asrIntervalRef.current) {
+            clearInterval(asrIntervalRef.current);
+            asrIntervalRef.current = null;
+        }
+
+        // 停止录音
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            mediaRecorderRef.current.stop();
+            mediaRecorderRef.current = null;
+        }
+
+        // 清理音频流
+        if (micPermissionStreamRef.current) {
+            micPermissionStreamRef.current.getTracks().forEach(track => track.stop());
+            micPermissionStreamRef.current = null;
+        }
+
+        // 停止 Web Speech API（如果存在）
+        if (recognitionRef.current) {
+            recognitionRef.current.stop();
+            recognitionRef.current = null;
+        }
+
+        console.log('[ASR] Backend ASR stopped');
     };
 
     const resetTimer = () => {
@@ -273,24 +394,33 @@ export default function VideoChat() {
 
         setIsLoading(true);
 
-        // 先开启本地摄像头
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'user' },
-                audio: false
-            });
-            localStreamRef.current = stream;
-            if (localVideoRef.current) {
-                localVideoRef.current.srcObject = stream;
+        // 先开启本地摄像头（仅在 HTTPS 或 localhost 环境下可用）
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user' },
+                    audio: false
+                });
+                localStreamRef.current = stream;
+                if (localVideoRef.current) {
+                    localVideoRef.current.srcObject = stream;
+                }
+                setIsCameraOn(true);
+            } catch (err) {
+                console.warn('无法获取摄像头（非HTTPS环境或权限被拒绝）:', err);
+                // 摄像头获取失败不阻止通话
             }
-            setIsCameraOn(true);
-        } catch (err) {
-            console.error('无法获取摄像头', err);
-            // 摄像头获取失败不阻止通话
+        } else {
+            console.warn('navigator.mediaDevices 不可用（需要 HTTPS 或 localhost）');
         }
 
+        // 配置 ICE 服务器以改善 NAT 穿透
         const config: RTCConfiguration = {
-            sdpSemantics: 'unified-plan'
+            sdpSemantics: 'unified-plan',
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+            ]
         } as any;
 
         const pc = new RTCPeerConnection(config);
@@ -429,6 +559,11 @@ export default function VideoChat() {
             }
             setIsCameraOn(false);
         } else {
+            // 检查 mediaDevices 是否可用
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                message.error('摄像头不可用（需要 HTTPS 或 localhost 访问）');
+                return;
+            }
             // 开启摄像头
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
@@ -468,6 +603,8 @@ export default function VideoChat() {
             if (aiSpeakingTimeoutRef.current) {
                 clearTimeout(aiSpeakingTimeoutRef.current);
             }
+            // 清理后端 ASR 资源
+            stopBackendASR();
         }
     }, []);
 

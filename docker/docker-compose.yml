@@ -1,17 +1,17 @@
 services:
   # SRS 流媒体服务器
   srs:
-    image: ossrs/srs:6
+    image: ossrs/srs:5
     container_name: livetalking-srs
     ports:
       - "1935:1935"   # RTMP
       - "1985:1985"   # HTTP API
-      - "8080:8080"   # SRS Console
+      - "9080:8080"   # SRS Console (changed to avoid conflict)
       - "8000:8000"   # WebRTC
       - "10080:10080" # WebRTC UDP
     volumes:
       - ./srs.conf:/usr/local/srs/conf/srs.conf:ro
-    command: /usr/local/srs/bin/srs -c /usr/local/srs/conf/srs.conf
+    command: ./objs/srs -c conf/srs.conf
     restart: unless-stopped
     networks:
       - livetalking-network

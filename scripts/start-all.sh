@@ -2,7 +2,7 @@
 # LiveTalking 一键启动脚本
 # ==========================================
 
-PROJECT_DIR="/Users/lukeding/Desktop/playground/2025/LiveTalking"
+PROJECT_DIR="/opt/2026/LiveTalking"
 DESKTOP_APP_DIR="$PROJECT_DIR/frontend/desktop_app"
 
 echo "🚀 LiveTalking 一键启动"

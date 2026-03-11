@@ -114,7 +114,7 @@ start() {
         --avatar_id wav2lip256_avatar1 \
         --tts $TTS_TYPE \
         --REF_FILE $DOUBAO_VOICE_ID \
-        --asr lip \
+        --asr tencent \
         --max_session 5 \
         >> "$LOG_FILE" 2>&1 &
 

@@ -18,19 +18,20 @@
 import asyncio
 import fractions
 import logging
+import threading
 import time
-from typing import Optional, Set, Union
-
-import numpy as np
-from aiortc import MediaStreamTrack
-from av import AudioFrame, VideoFrame
+from typing import Tuple, Dict, Optional, Set, Union
 from av.frame import Frame
 from av.packet import Packet
+from av import AudioFrame, VideoFrame
+import numpy as np
+
+from aiortc import MediaStreamTrack
 from logger import logger as mylogger
 
 AUDIO_PTIME = 0.020  # 20ms audio packetization
 VIDEO_CLOCK_RATE = 90000
-VIDEO_PTIME = 1.0 / 25  # 25fps = 40ms per frame
+VIDEO_PTIME = 0.040  # 25fps = 40ms per frame
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 SAMPLE_RATE = 16000
 AUDIO_TIME_BASE = fractions.Fraction(1, SAMPLE_RATE)
@@ -41,155 +42,114 @@ logger = logging.getLogger(__name__)
 
 class PlayerStreamTrack(MediaStreamTrack):
     """
-    音视频轨道 - 简化稳定版
+    A video track that returns an animated flag.
     """
 
     def __init__(self, player, kind):
-        super().__init__()
+        super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
-        queue_size = 100 if kind == "audio" else 50
-        self._queue = asyncio.Queue(maxsize=queue_size)
-        self._last_frame = None
-        self._start = None
-        self._timestamp = 0
-
+        self._queue = asyncio.Queue(maxsize=10)
+        self.timelist = []  # 记录最近包的时间戳
+        self.current_frame_count = 0
         if self.kind == 'video':
             self.framecount = 0
             self.lasttime = time.perf_counter()
             self.totaltime = 0
 
+    _start: float
+    _timestamp: int
+
+    async def next_timestamp(self) -> Tuple[int, fractions.Fraction]:
+        if self.readyState != "live":
+            raise Exception
+
+        if self.kind == 'video':
+            if hasattr(self, "_timestamp"):
+                self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+                self.current_frame_count += 1
+                wait = self._start + self.current_frame_count * VIDEO_PTIME - time.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            else:
+                self._start = time.time()
+                self._timestamp = 0
+                self.timelist.append(self._start)
+                mylogger.info('video start:%f', self._start)
+            return self._timestamp, VIDEO_TIME_BASE
+        else:  # audio
+            if hasattr(self, "_timestamp"):
+                self._timestamp += int(AUDIO_PTIME * SAMPLE_RATE)
+                self.current_frame_count += 1
+                wait = self._start + self.current_frame_count * AUDIO_PTIME - time.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            else:
+                self._start = time.time()
+                self._timestamp = 0
+                self.timelist.append(self._start)
+                mylogger.info('audio start:%f', self._start)
+            return self._timestamp, AUDIO_TIME_BASE
+
     async def recv(self) -> Union[Frame, Packet]:
         self._player._start(self)
-
-        # 获取帧
-        try:
-            frame, eventpoint = await asyncio.wait_for(self._queue.get(), timeout=2.0)
-            if frame is not None:
-                self._last_frame = frame
-        except asyncio.TimeoutError:
-            if self.readyState != "live":
-                raise Exception("Track stopped")
-
-            if self.kind == 'audio':
-                # Determine expected samples and sample_rate from player/container
-                try:
-                    sr, expected_samples = self._player.get_audio_params()
-                except Exception:
-                    sr = SAMPLE_RATE
-                    expected_samples = int(SAMPLE_RATE * AUDIO_PTIME)
-
-                audio = np.zeros((1, expected_samples), dtype=np.int16)
-                frame = AudioFrame.from_ndarray(
-                    audio, layout='mono', format='s16')
-                frame.sample_rate = sr
-            else:
-                if self._last_frame is not None:
-                    frame = self._last_frame
-                else:
-                    frame = VideoFrame.from_ndarray(
-                        np.zeros((480, 640, 3), dtype=np.uint8), format="bgr24")
-            eventpoint = {}
-
-        if frame is None:
-            self.stop()
-            raise Exception("Frame is None")
-
-        # 设置时间戳
-        if self.kind == 'audio':
-            # Use frame.sample_rate/samples when available, otherwise query player
-            if not hasattr(frame, 'sample_rate'):
-                try:
-                    sr, _ = self._player.get_audio_params()
-                except Exception:
-                    sr = SAMPLE_RATE
-                frame.sample_rate = sr
-
-            samples = getattr(frame, 'samples', None)
-            if samples is None:
-                try:
-                    _, expected_samples = self._player.get_audio_params()
-                except Exception:
-                    expected_samples = int(SAMPLE_RATE * AUDIO_PTIME)
-                samples = expected_samples
-
-            if self._start is None:
-                self._start = time.time()
-                self._timestamp = 0
-                mylogger.debug(f'[AUDIO] Track started')
-
-            frame.pts = self._timestamp
-            frame.time_base = fractions.Fraction(1, frame.sample_rate)
-            self._timestamp += samples
-            # 音频不做节奏控制，让WebRTC自己处理
-        else:
-            if self._start is None:
-                self._start = time.time()
-                self._timestamp = 0
-                mylogger.debug(f'[VIDEO] Track started')
-
-            frame.pts = self._timestamp
-            frame.time_base = VIDEO_TIME_BASE
-            self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
-
-            # 视频按帧率控制
-            frame_count = self._timestamp // int(
-                VIDEO_PTIME * VIDEO_CLOCK_RATE)
-            expected_time = self._start + frame_count * VIDEO_PTIME
-            wait_time = expected_time - time.time()
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
-
+        frame, eventpoint = await self._queue.get()
+        pts, time_base = await self.next_timestamp()
+        frame.pts = pts
+        frame.time_base = time_base
         if eventpoint and self._player is not None:
             self._player.notify(eventpoint)
-
+        if frame is None:
+            self.stop()
+            raise Exception
         if self.kind == 'video':
             self.totaltime += (time.perf_counter() - self.lasttime)
             self.framecount += 1
             self.lasttime = time.perf_counter()
             if self.framecount == 100:
-                mylogger.info(
-                    f"Video FPS: {self.framecount/self.totaltime:.2f}")
+                mylogger.info(f"------actual avg final fps:{self.framecount/self.totaltime:.4f}")
                 self.framecount = 0
                 self.totaltime = 0
-
         return frame
 
     def stop(self):
         super().stop()
+        # Drain & delete remaining frames
         while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except:
-                pass
+            item = self._queue.get_nowait()
+            del item
         if self._player is not None:
             self._player._stop(self)
             self._player = None
 
 
-def player_worker_thread(quit_event, loop, container, audio_track, video_track):
+def player_worker_thread(
+    quit_event,
+    loop,
+    container,
+    audio_track,
+    video_track
+):
     container.render(quit_event, loop, audio_track, video_track)
 
 
 class HumanPlayer:
 
-    def __init__(self, nerfreal, format=None, options=None, timeout=None, loop=False, decode=True):
-        self.__thread = None
-        self.__thread_quit = None
+    def __init__(
+        self, nerfreal, format=None, options=None, timeout=None, loop=False, decode=True
+    ):
+        self.__thread: Optional[threading.Thread] = None
+        self.__thread_quit: Optional[threading.Event] = None
+
+        # examine streams
         self.__started: Set[PlayerStreamTrack] = set()
+        self.__audio: Optional[PlayerStreamTrack] = None
+        self.__video: Optional[PlayerStreamTrack] = None
 
         self.__audio = PlayerStreamTrack(self, kind="audio")
         self.__video = PlayerStreamTrack(self, kind="video")
-        self.__container = nerfreal
 
-    def get_audio_params(self):
-        """Return (sample_rate, expected_samples) used for audio frames."""
-        container = getattr(self, '_HumanPlayer__container', None)
-        if container is not None:
-            sr = getattr(container, 'sample_rate', SAMPLE_RATE)
-            expected = getattr(container, 'chunk', int(sr * AUDIO_PTIME))
-            return sr, expected
-        return SAMPLE_RATE, int(SAMPLE_RATE * AUDIO_PTIME)
+        self.__container = nerfreal
 
     def notify(self, eventpoint):
         if self.__container is not None:
@@ -197,21 +157,24 @@ class HumanPlayer:
 
     @property
     def audio(self) -> MediaStreamTrack:
+        """
+        A :class:`aiortc.MediaStreamTrack` instance if the file contains audio.
+        """
         return self.__audio
 
     @property
     def video(self) -> MediaStreamTrack:
+        """
+        A :class:`aiortc.MediaStreamTrack` instance if the file contains video.
+        """
         return self.__video
 
     def _start(self, track: PlayerStreamTrack) -> None:
-        # 仅当 track 首次加入时记录，避免每次 recv 调用都输出日志
-        if track not in self.__started:
-            self.__started.add(track)
-            mylogger.debug(f"[HumanPlayer] Track started: {track.kind}")
-
+        self.__started.add(track)
         if self.__thread is None:
-            self.__thread_quit = asyncio.Event() if False else __import__('threading').Event()
-            self.__thread = __import__('threading').Thread(
+            self.__log_debug("Starting worker thread")
+            self.__thread_quit = threading.Event()
+            self.__thread = threading.Thread(
                 name="media-player",
                 target=player_worker_thread,
                 args=(
@@ -222,29 +185,19 @@ class HumanPlayer:
                     self.__video
                 ),
             )
-            # Make the worker a daemon so it won't block process exit if it
-            # doesn't terminate promptly on KeyboardInterrupt.
-            self.__thread.daemon = True
             self.__thread.start()
-            mylogger.debug("[HumanPlayer] Worker thread started")
 
     def _stop(self, track: PlayerStreamTrack) -> None:
-        # 仅当 track 实际存在于集合中时记录停止日志
-        if track in self.__started:
-            self.__started.discard(track)
-            mylogger.debug(f"[HumanPlayer] Track stopped: {track.kind}")
+        self.__started.discard(track)
 
         if not self.__started and self.__thread is not None:
+            self.__log_debug("Stopping worker thread")
             self.__thread_quit.set()
-            # join with timeout to avoid freezing shutdown if thread is stuck
-            try:
-                self.__thread.join(timeout=1.0)
-            except Exception:
-                pass
-            if self.__thread.is_alive():
-                mylogger.warning(
-                    "[HumanPlayer] Worker thread did not exit in time; continuing shutdown")
+            self.__thread.join()
             self.__thread = None
 
         if not self.__started and self.__container is not None:
             self.__container = None
+
+    def __log_debug(self, msg: str, *args) -> None:
+        mylogger.debug(f"HumanPlayer {msg}", *args)

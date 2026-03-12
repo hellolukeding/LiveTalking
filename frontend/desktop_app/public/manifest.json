@@ -1,0 +1,49 @@
+{
+  "name": "LiveTalking",
+  "short_name": "LiveTalking",
+  "description": "AI数字人对话系统",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#5b4aff",
+  "orientation": "any",
+  "scope": "/",
+  "id": "/",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["productivity", "communication"],
+  "shortcuts": [
+    {
+      "name": "开始对话",
+      "short_name": "对话",
+      "description": "与AI数字人开始对话",
+      "url": "/",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "形象管理",
+      "short_name": "形象",
+      "description": "管理数字人形象",
+      "url": "/avatars",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}

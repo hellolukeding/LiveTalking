@@ -489,7 +489,7 @@ class BaseReal:
             _transition_start = time.time()
             _transition_duration = 0.1  # 过渡时间
             _last_silent_frame = None  # 静音帧缓存
-            _last_speaking_frame = None  # 说话帧缓存
+            _last_speaking_frame = null  # 说话帧缓存
 
         if self.opt.transport == 'virtualcam':
             logger.debug(f"[PROCESS_FRAMES] Using virtualcam transport")
@@ -507,29 +507,53 @@ class BaseReal:
             if video_track is None:
                 logger.error("[PROCESS_FRAMES] Video track is None!")
             if loop is None:
-                logger.error("[PROCESS_FRAMES] Event loop is None!")
+                logger.error("[PROCESS_LOGS] Event loop is None!")
 
         frame_count = 0
         last_log_time = time.time()
+        last_frame_time = time.time()  # 记录最后一次收到帧的时间
+
+        # 🆕 超时配置：防止异常断开后线程无限等待
+        idle_timeout = 30  # 30秒无新帧则退出
+        max_run_time = 3600  # 最大运行1小时后强制退出
+        start_time = time.time()
 
         while not quit_event.is_set():
+            # 🆕 检查是否超时
+            current_time = time.time()
+            if current_time - last_frame_time > idle_timeout:
+                logger.warning(
+                    f"[PROCESS_FRAMES] Session {self.sessionid} idle timeout ({current_time - last_frame_time:.1f}s > {idle_timeout}s), stopping...")
+                break
+
+            if current_time - start_time > max_run_time:
+                logger.warning(
+                    f"[PROCESS_FRAMES] Session {self.sessionid} max run time exceeded ({max_run_time}s), forcing exit...")
+                break
+
             try:
                 res_frame, idx, audio_frames = self.res_frame_queue.get(
                     block=True, timeout=1)
                 frame_count += 1
+                last_frame_time = current_time  # 更新最后帧时间
 
                 # Log frame processing status every 2 seconds
-                if time.time() - last_log_time > 2:
+                if current_time - last_log_time > 2:
                     logger.debug(
                         f"[PROCESS_FRAMES] Processing frames: count={frame_count}, session={self.sessionid}")
                     logger.debug(
                         f"[PROCESS_FRAMES] Audio queue size: {self.res_frame_queue.qsize()}")
-                    last_log_time = time.time()
+                    last_log_time = current_time
                     frame_count = 0
 
             except queue.Empty:
                 logger.debug(
-                    f"[PROCESS_FRAMES] Queue empty, waiting for frames...")
+                    f"[PROCESS_FRAMES] Queue empty, waiting for frames... (idle: {current_time - last_frame_time:.1f}s/{idle_timeout}s)")
+                # 🆕 空闲时间过长时退出
+                if current_time - last_frame_time > idle_timeout:
+                    logger.warning(
+                        f"[PROCESS_FRAMES] Idle timeout reached, stopping process_frames for session {self.sessionid}")
+                    break
                 continue
             except Exception as e:
                 logger.debug(

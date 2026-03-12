@@ -116,7 +116,8 @@ start_service() {
 
     # 构建启动命令
     cd "$PROJECT_ROOT"
-    local cmd="$PYTHON_BIN src/main/app.py"
+    export PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/src/main:$PROJECT_ROOT/src/core:$PROJECT_ROOT/src/utils:$PROJECT_ROOT/src/llm:$PROJECT_ROOT/src/services"
+    local cmd="$PROJECT_ROOT/deploy/run_backend.sh"
     cmd="$cmd --model $MODEL_TYPE"
     cmd="$cmd --tts $TTS_TYPE"
     cmd="$cmd --avatar_id $AVATAR_ID"
@@ -133,7 +134,7 @@ start_service() {
     echo "日志文件: $MAIN_LOG"
 
     # 启动服务
-    nohup $cmd > "$MAIN_LOG" 2>> "$ERROR_LOG" &
+    PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/src/main:$PROJECT_ROOT/src/core:$PROJECT_ROOT/src/utils:$PROJECT_ROOT/src/llm:$PROJECT_ROOT/src/services" nohup $cmd > "$MAIN_LOG" 2>> "$ERROR_LOG" &
     local pid=$!
     echo $pid > "$PID_FILE"
 

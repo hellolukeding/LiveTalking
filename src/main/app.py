@@ -87,6 +87,7 @@ avatar = None
 
 ##### webrtc###############################
 pcs = set()
+webrtc_players: Dict[int, HumanPlayer] = {}  # sessionid:HumanPlayer
 
 
 def randN(N) -> int:
@@ -174,22 +175,13 @@ async def offer(request):
 
         # Create WebRTC peer connection
         try:
-            # 国内 STUN 服务器列表 (提高连接成功率)
+            # 本地 STUN 服务器 (coturn)
             ice_servers = [
-                # 腾讯云 STUN (主要)
+                # 本地 STUN 服务器 (最快)
+                RTCIceServer(urls='stun:192.168.1.132:3478'),
+                
+                # 腾讯云 STUN (备用)
                 RTCIceServer(urls='stun:stun.qq.com:3478'),
-                
-                # 阿里云 STUN (备用)
-                RTCIceServer(urls='stun:stun.aliyun.com:3478'),
-                
-                # 网易蜂信 STUN (备用)
-                RTCIceServer(urls='stun:stun.miwifi.com:3478'),
-                
-                # Cloudflare STUN (国际备用，国内访问也较快)
-                RTCIceServer(urls='stun:stun.cloudflare.com:3478'),
-                
-                # Google STUN (国际备用)
-                RTCIceServer(urls='stun:stun.l.google.com:19302'),
             ]
             pc = RTCPeerConnection(
                 configuration=RTCConfiguration(iceServers=ice_servers))
@@ -275,37 +267,63 @@ async def offer(request):
         async def on_connectionstatechange():
             logger.debug(
                 f"[WEBRTC] Connection state changed: {pc.connectionState} for session {sessionid}")
-            if pc.connectionState == "failed":
-                logger.error(
-                    f"[WEBRTC] Connection failed for session {sessionid}")
+
+            # Proactively handle disconnection states
+            if pc.connectionState in ("disconnected", "failed", "closed"):
+                logger.warning(
+                    f"[WEBRTC] Connection {pc.connectionState} for session {sessionid}")
+
+                # Stop the player's tracks to signal frame processing thread
+                if sessionid in webrtc_players:
+                    player = webrtc_players[sessionid]
+                    try:
+                        if player.audio is not None:
+                            player.audio.stop()
+                            logger.debug(f"[WEBRTC] Stopped audio track for session {sessionid}")
+                        if player.video is not None:
+                            player.video.stop()
+                            logger.debug(f"[WEBRTC] Stopped video track for session {sessionid}")
+                    except Exception as e:
+                        logger.error(f"[WEBRTC] Error stopping tracks: {str(e)}")
+                    finally:
+                        del webrtc_players[sessionid]
+
+                # Close peer connection and cleanup
                 try:
                     await pc.close()
                     pcs.discard(pc)
                     if sessionid in nerfreals:
                         del nerfreals[sessionid]
                     logger.debug(
-                        f"[WEBRTC] Cleaned up failed session {sessionid}")
+                        f"[WEBRTC] Cleaned up {pc.connectionState} session {sessionid}")
                 except Exception as e:
                     logger.error(
-                        f"[WEBRTC] Error cleaning up failed session: {str(e)}")
-            elif pc.connectionState == "closed":
-                logger.debug(
-                    f"[WEBRTC] Connection closed for session {sessionid}")
-                try:
-                    pcs.discard(pc)
-                    if sessionid in nerfreals:
-                        del nerfreals[sessionid]
-                    logger.debug(
-                        f"[WEBRTC] Cleaned up closed session {sessionid}")
-                except Exception as e:
-                    logger.error(
-                        f"[WEBRTC] Error cleaning up closed session: {str(e)}")
+                        f"[WEBRTC] Error cleaning up {pc.connectionState} session: {str(e)}")
+
+        @pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange():
+            logger.debug(
+                f"[WEBRTC] ICE connection state changed: {pc.iceConnectionState} for session {sessionid}")
+            if pc.iceConnectionState in ("disconnected", "failed", "closed"):
+                logger.warning(
+                    f"[WEBRTC] ICE connection {pc.iceConnectionState} for session {sessionid}")
+                # Stop tracks proactively to prevent thread hanging
+                if sessionid in webrtc_players:
+                    player = webrtc_players[sessionid]
+                    try:
+                        if player.audio is not None:
+                            player.audio.stop()
+                        if player.video is not None:
+                            player.video.stop()
+                    except Exception as e:
+                        logger.error(f"[WEBRTC] Error stopping tracks on ICE state change: {str(e)}")
 
         # Create tracks
         try:
             logger.debug(
                 f"[OFFER] Creating media tracks for session {sessionid}")
             player = HumanPlayer(nerfreals[sessionid])
+            webrtc_players[sessionid] = player  # Store player reference for cleanup
             audio_sender = pc.addTrack(player.audio)
             video_sender = pc.addTrack(player.video)
             logger.debug(
@@ -966,10 +984,25 @@ async def run(push_url, sessionid):
     async def on_connectionstatechange():
         logger.info("Connection state is %s" % pc.connectionState)
         if pc.connectionState == "failed":
+            # Stop the player's tracks to signal frame processing thread
+            if sessionid in webrtc_players:
+                player = webrtc_players[sessionid]
+                try:
+                    if player.audio is not None:
+                        player.audio.stop()
+                    if player.video is not None:
+                        player.video.stop()
+                except Exception as e:
+                    logger.error(f"[WEBRTC] Error stopping tracks: {str(e)}")
+                finally:
+                    del webrtc_players[sessionid]
             await pc.close()
             pcs.discard(pc)
+            if sessionid in nerfreals:
+                del nerfreals[sessionid]
 
     player = HumanPlayer(nerfreals[sessionid])
+    webrtc_players[sessionid] = player  # Store player reference for cleanup
     audio_sender = pc.addTrack(player.audio)
     video_sender = pc.addTrack(player.video)
 

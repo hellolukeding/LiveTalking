@@ -35,7 +35,7 @@ COPY ssl/key.pem /etc/nginx/ssl/key.pem
 COPY nginx.conf /etc/nginx/nginx.conf
 
 # 暴露端口
-EXPOSE 1420
+EXPOSE 1420 8443
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

@@ -39,3 +39,11 @@ debug_*.wav
 
 # Reference data
 refer/
+
+# SSL Certificates (generated locally with mkcert)
+*.pem
+*.crt
+*.key
+!*.key.example
+deploy/frontend/ssl/
+frontend/desktop_app/ssl/

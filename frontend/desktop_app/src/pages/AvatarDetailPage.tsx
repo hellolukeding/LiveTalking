@@ -40,12 +40,12 @@ const StatusTag = ({ status }: { status: AvatarMeta['status'] }) => {
 };
 
 const AvatarImage = ({ avatar }: { avatar: AvatarMeta }) => {
-  const hasImage = avatar.image_path && avatar.status === 'ready';
+  const imagePath = avatar.image_path && avatar.status === 'ready' ? avatar.image_path : undefined;
 
-  if (hasImage) {
+  if (imagePath) {
     return (
       <img
-        src={avatar.image_path}
+        src={imagePath}
         alt={avatar.name}
         style={{
           width: 80,
@@ -66,7 +66,7 @@ const AvatarImage = ({ avatar }: { avatar: AvatarMeta }) => {
   return (
     <div
       data-fallback
-      style={{ display: hasImage ? 'none' : 'flex' }}
+      style={{ display: imagePath ? 'none' : 'flex' }}
     >
       <Avatar
         size={80}

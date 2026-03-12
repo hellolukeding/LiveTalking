@@ -29,12 +29,12 @@ const StatusBadge = ({ status }: { status: AvatarMeta['status'] }) => {
 };
 
 const AvatarCardCover = ({ avatar }: { avatar: AvatarMeta }) => {
-  const hasImage = avatar.image_path && avatar.status === 'ready';
+  const imagePath = avatar.image_path && avatar.status === 'ready' ? avatar.image_path : undefined;
 
-  if (hasImage) {
+  if (imagePath) {
     return (
       <img
-        src={avatar.image_path}
+        src={imagePath}
         alt={avatar.name}
         style={{
           width: '100%',

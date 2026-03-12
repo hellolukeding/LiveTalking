@@ -13,6 +13,13 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # 加载配置文件
 if [ -f "$SCRIPT_DIR/livetalking.conf" ]; then
     source "$SCRIPT_DIR/livetalking.conf"
+
+# 加载 .env 文件（Doubao API 凭证等）
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        set -a
+        source "$PROJECT_ROOT/.env"
+        set +a
+    fi
 else
     # 默认配置
     PROJECT_ROOT="/opt/2026/LiveTalking"
@@ -116,6 +123,8 @@ start_service() {
 
     # 构建启动命令
     cd "$PROJECT_ROOT"
+    export AV_SYNC_DELAY_MS="${AV_SYNC_DELAY_MS:-600}"
+    export ASR_IDLE_THRESHOLD_MS="${ASR_IDLE_THRESHOLD_MS:-200}"
     export PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/src/main:$PROJECT_ROOT/src/core:$PROJECT_ROOT/src/utils:$PROJECT_ROOT/src/llm:$PROJECT_ROOT/src/services"
     local cmd="$PROJECT_ROOT/deploy/run_backend.sh"
     cmd="$cmd --model $MODEL_TYPE"
@@ -134,6 +143,8 @@ start_service() {
     echo "日志文件: $MAIN_LOG"
 
     # 启动服务
+    export AV_SYNC_DELAY_MS="${AV_SYNC_DELAY_MS:-600}"
+    export ASR_IDLE_THRESHOLD_MS="${ASR_IDLE_THRESHOLD_MS:-200}"
     PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT/src/main:$PROJECT_ROOT/src/core:$PROJECT_ROOT/src/utils:$PROJECT_ROOT/src/llm:$PROJECT_ROOT/src/services" nohup $cmd > "$MAIN_LOG" 2>> "$ERROR_LOG" &
     local pid=$!
     echo $pid > "$PID_FILE"

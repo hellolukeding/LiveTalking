@@ -23,6 +23,7 @@ import queue
 import subprocess
 import threading
 import time
+from collections import deque
 from fractions import Fraction
 from io import BytesIO
 from queue import Queue
@@ -75,6 +76,7 @@ class BaseReal:
         # 320 samples per chunk (20ms * 16000 / 1000)
         self.chunk = self.sample_rate // opt.fps
         self.sessionid = self.opt.sessionid
+        self._last_audio_in_time = time.perf_counter()
 
         # 🚀 延迟初始化 TTS 以加快 /offer 响应速度
         # TTS 初始化可能涉及网络连接，放在 render() 中异步执行
@@ -107,6 +109,83 @@ class BaseReal:
         # Use a thread-safe list to buffer frames and flush later when possible
         self._pending_audio = []  # list of (AudioFrame, datainfo)
         self._pending_audio_lock = threading.Lock()
+
+        # Audio output A/V sync: delay audio output to align with video pipeline latency.
+        # This delays only what we send to WebRTC audio_track; LipASR still receives audio immediately.
+        try:
+            self._audio_out_delay_s = float(os.getenv("AV_SYNC_DELAY_MS", "0")) / 1000.0
+        except Exception:
+            self._audio_out_delay_s = 0.0
+        if self._audio_out_delay_s < 0:
+            self._audio_out_delay_s = 0.0
+
+        try:
+            fps = int(getattr(opt, "fps", 50)) or 50
+        except Exception:
+            fps = 50
+        self._audio_out_period_s = 1.0 / float(fps)
+
+        self._audio_out_buffer = deque()  # deque[(due_time, AudioFrame, datainfo)]
+        self._audio_out_lock = threading.Lock()
+        self._audio_out_started = False
+        self._audio_out_thread = None
+
+    def start_audio_out_worker(self, quit_event: Event):
+        """
+        Start a background worker that releases delayed audio frames at real-time cadence.
+        Must be called from render() after loop/audio_track are set.
+        """
+        if self._audio_out_delay_s <= 0:
+            return
+        if self._audio_out_started:
+            return
+        self._audio_out_started = True
+        self._audio_out_thread = Thread(
+            target=self._audio_out_worker,
+            args=(quit_event,),
+            daemon=True,
+            name=f"audio-out-{self.sessionid}",
+        )
+        self._audio_out_thread.start()
+
+    def _enqueue_audio_out(self, frame: AudioFrame, datainfo: dict):
+        due = time.perf_counter() + self._audio_out_delay_s
+        with self._audio_out_lock:
+            self._audio_out_buffer.append((due, frame, datainfo))
+
+    def _audio_out_worker(self, quit_event: Event):
+        next_send_time = time.perf_counter()
+        while True:
+            if quit_event.is_set():
+                with self._audio_out_lock:
+                    if not self._audio_out_buffer:
+                        break
+
+            now = time.perf_counter()
+            if now < next_send_time:
+                time.sleep(min(0.005, next_send_time - now))
+                continue
+
+            item = None
+            with self._audio_out_lock:
+                if self._audio_out_buffer and self._audio_out_buffer[0][0] <= now:
+                    _, frame, datainfo = self._audio_out_buffer.popleft()
+                    item = (frame, datainfo)
+
+            if not item:
+                time.sleep(0.005)
+                continue
+
+            # Best-effort push; if the queue is full, we drop to avoid backpressure.
+            if hasattr(self, "audio_track") and self.audio_track and hasattr(self, "loop") and self.loop and self.loop.is_running():
+                try:
+                    self.loop.call_soon_threadsafe(
+                        self.audio_track._queue.put_nowait, item)
+                except Exception:
+                    pass
+
+            # Maintain real-time pacing (20ms per frame at 50fps).
+            next_send_time = max(next_send_time + self._audio_out_period_s, time.perf_counter())
 
     def send_custom_msg(self, msg):
         if self.datachannel:
@@ -161,6 +240,7 @@ class BaseReal:
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
         """音频帧转发 - 简化版"""
+        self._last_audio_in_time = time.perf_counter()
         # 转发给ASR（口型驱动）
         if hasattr(self, 'asr'):
             try:
@@ -205,15 +285,19 @@ class BaseReal:
             if self._pending_audio:
                 self._flush_pending_audio()
 
-            if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-                try:
-                    self.loop.call_soon_threadsafe(
-                        self.audio_track._queue.put_nowait, (new_frame, datainfo))
-                except Exception:
-                    pass  # 队列满时丢弃
+            # If A/V sync delay is enabled, enqueue into delayed buffer.
+            if self._audio_out_delay_s > 0:
+                self._enqueue_audio_out(new_frame, datainfo)
             else:
-                with self._pending_audio_lock:
-                    self._pending_audio.append((new_frame, datainfo))
+                if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+                    try:
+                        self.loop.call_soon_threadsafe(
+                            self.audio_track._queue.put_nowait, (new_frame, datainfo))
+                    except Exception:
+                        pass  # 队列满时丢弃
+                else:
+                    with self._pending_audio_lock:
+                        self._pending_audio.append((new_frame, datainfo))
 
         except Exception as e:
             logger.error(f"[BASE_REAL] Audio error: {e}")
@@ -226,6 +310,12 @@ class BaseReal:
             pending = self._pending_audio
             self._pending_audio = []
         if not pending:
+            return
+
+        # If delay is enabled, enqueue pending frames into delayed buffer (worker will release them).
+        if self._audio_out_delay_s > 0:
+            for f, d in pending:
+                self._enqueue_audio_out(f, d)
             return
 
         # 🆕 修复：优先使用self.loop

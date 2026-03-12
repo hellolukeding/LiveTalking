@@ -294,6 +294,11 @@ class LightReal(BaseReal):
         # 🆕 修复：保存音频轨道引用到父类
         self.audio_track = audio_track
         self.loop = loop
+        # Start delayed audio output worker (for A/V sync) if enabled.
+        try:
+            self.start_audio_out_worker(quit_event)
+        except Exception:
+            pass
 
         # 传递音轨与事件循环以支持 TTS 直接转发到 WebRTC
         if self.tts:

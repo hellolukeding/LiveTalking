@@ -441,6 +441,11 @@ class LipReal(BaseReal):
         #     self.asr.warm_up()
 
         self.init_customindex()
+        # Start delayed audio output worker (for A/V sync) if enabled.
+        try:
+            self.start_audio_out_worker(quit_event)
+        except Exception:
+            pass
         # 传递音频轨道给TTS
         if self.tts:
             self.tts.render(quit_event, audio_track, loop)

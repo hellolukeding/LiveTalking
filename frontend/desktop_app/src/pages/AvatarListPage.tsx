@@ -28,6 +28,54 @@ const StatusBadge = ({ status }: { status: AvatarMeta['status'] }) => {
   return <Tag icon={<ExclamationCircleOutlined />} color="error">失败</Tag>;
 };
 
+const AvatarCardCover = ({ avatar }: { avatar: AvatarMeta }) => {
+  const hasImage = avatar.image_path && avatar.status === 'ready';
+
+  if (hasImage) {
+    return (
+      <img
+        src={avatar.image_path}
+        alt={avatar.name}
+        style={{
+          width: '100%',
+          height: 160,
+          objectFit: 'cover',
+        }}
+        onError={(e) => {
+          // 图片加载失败时回退到字母头像
+          e.currentTarget.style.display = 'none';
+          const fallback = e.currentTarget.parentElement?.querySelector('[data-fallback]');
+          if (fallback) (fallback as HTMLElement).style.display = 'flex';
+        }}
+      />
+    );
+  }
+
+  return (
+    <div
+      data-fallback
+      style={{
+        width: '100%',
+        height: 160,
+        background: '#f5f5f5',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <Avatar
+        size={80}
+        style={{
+          background: '#5b4aff',
+          fontSize: 36,
+        }}
+      >
+        {avatar.name.charAt(0).toUpperCase()}
+      </Avatar>
+    </div>
+  );
+};
+
 export default function AvatarListPage() {
   const navigate = useNavigate();
   const [avatars, setAvatars] = useState<AvatarMeta[]>([]);
@@ -88,16 +136,15 @@ export default function AvatarListPage() {
     <div
       style={{
         minHeight: '100vh',
-        background: 'linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%)',
+        background: '#ededed',
         padding: '0 0 40px',
       }}
     >
       {/* 顶部导航 */}
       <div
         style={{
-          background: 'rgba(255,255,255,0.06)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          background: '#fff',
+          borderBottom: '1px solid #e5e5e5',
           padding: '16px 32px',
           display: 'flex',
           alignItems: 'center',
@@ -109,13 +156,13 @@ export default function AvatarListPage() {
             type="text"
             icon={<VideoCameraOutlined />}
             onClick={() => navigate('/')}
-            style={{ color: 'rgba(255,255,255,0.7)', fontSize: 14 }}
+            style={{ color: '#666', fontSize: 14 }}
           >
             返回对话
           </Button>
-          <span style={{ color: 'rgba(255,255,255,0.2)' }}>|</span>
-          <Title level={4} style={{ margin: 0, color: '#fff' }}>
-            <UserOutlined style={{ marginRight: 8, color: '#7c6aff' }} />
+          <span style={{ color: '#ddd' }}>|</span>
+          <Title level={4} style={{ margin: 0, color: '#333' }}>
+            <UserOutlined style={{ marginRight: 8, color: '#5b4aff' }} />
             数字人形象管理
           </Title>
         </div>
@@ -125,11 +172,10 @@ export default function AvatarListPage() {
           size="large"
           onClick={() => navigate('/avatars/create')}
           style={{
-            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            background: '#5b4aff',
             border: 'none',
-            borderRadius: 10,
-            fontWeight: 600,
-            boxShadow: '0 4px 16px rgba(118,75,162,0.5)',
+            borderRadius: 8,
+            fontWeight: 500,
           }}
         >
           新建形象
@@ -145,7 +191,7 @@ export default function AvatarListPage() {
         ) : avatars.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description={<Text style={{ color: 'rgba(255,255,255,0.5)' }}>还没有数字人形象，点击右上角创建一个吧</Text>}
+            description="还没有数字人形象，点击右上角创建一个吧"
             style={{ paddingTop: 100 }}
           />
         ) : (
@@ -155,40 +201,21 @@ export default function AvatarListPage() {
                 <Card
                   hoverable
                   style={{
-                    background: 'rgba(255,255,255,0.07)',
-                    backdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: 16,
+                    background: '#fff',
+                    border: '1px solid #e5e5e5',
+                    borderRadius: 12,
                     overflow: 'hidden',
-                    transition: 'all 0.3s ease',
                   }}
                   styles={{ body: { padding: 20 } }}
                   cover={
-                    <div
-                      style={{
-                        height: 160,
-                        background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        position: 'relative',
-                      }}
-                    >
-                      <Avatar
-                        size={80}
-                        style={{
-                          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                          fontSize: 36,
-                        }}
-                      >
-                        {avatar.name.charAt(0).toUpperCase()}
-                      </Avatar>
+                    <div style={{ position: 'relative' }}>
+                      <AvatarCardCover avatar={avatar} />
                       {avatar.status === 'creating' && (
                         <div
                           style={{
                             position: 'absolute',
                             inset: 0,
-                            background: 'rgba(0,0,0,0.5)',
+                            background: 'rgba(255,255,255,0.9)',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
@@ -197,7 +224,7 @@ export default function AvatarListPage() {
                           }}
                         >
                           <Spin size="large" />
-                          <Text style={{ color: '#fff', fontSize: 12 }}>正在生成...</Text>
+                          <Text style={{ color: '#333', fontSize: 12 }}>正在生成...</Text>
                         </div>
                       )}
                     </div>
@@ -205,13 +232,13 @@ export default function AvatarListPage() {
                   actions={[
                     <Tooltip title="编辑/查看详情" key="edit">
                       <EditOutlined
-                        style={{ color: '#7c6aff', fontSize: 16 }}
+                        style={{ color: '#5b4aff', fontSize: 16 }}
                         onClick={() => navigate(`/avatars/${avatar.avatar_id}`)}
                       />
                     </Tooltip>,
                     <Tooltip title="删除形象" key="delete">
                       <DeleteOutlined
-                        style={{ color: '#ff4d4f', fontSize: 16 }}
+                        style={{ color: '#fa5151', fontSize: 16 }}
                         onClick={() => handleDelete(avatar)}
                       />
                     </Tooltip>,
@@ -219,20 +246,20 @@ export default function AvatarListPage() {
                 >
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <Text strong style={{ color: '#fff', fontSize: 16, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <Text strong style={{ color: '#333', fontSize: 16, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {avatar.name}
                       </Text>
                       <StatusBadge status={avatar.status} />
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12 }}>
+                      <Text style={{ color: '#999', fontSize: 12 }}>
                         语音：{TTS_LABELS[avatar.tts_type] ?? avatar.tts_type}
                       </Text>
-                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }} ellipsis>
+                      <Text style={{ color: '#aaa', fontSize: 11 }} ellipsis>
                         Voice: {avatar.voice_id}
                       </Text>
                       {avatar.frame_count != null && avatar.frame_count > 0 && (
-                        <Text style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11 }}>
+                        <Text style={{ color: '#bbb', fontSize: 11 }}>
                           {avatar.frame_count} 帧
                         </Text>
                       )}

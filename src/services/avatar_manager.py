@@ -33,6 +33,37 @@ def get_meta_path(avatar_id: str) -> Path:
     return get_avatar_path(avatar_id) / "meta.json"
 
 
+def get_avatar_image_path(avatar_id: str) -> Optional[str]:
+    """
+    获取形象头像的相对路径（用于API返回）。
+    优先使用 face_imgs，其次 full_imgs，取第一帧。
+    返回 None 表示没有可用图片。
+    """
+    avatar_path = get_avatar_path(avatar_id)
+    if not avatar_path.exists():
+        return None
+
+    # 优先使用 face_imgs（人脸裁剪图）
+    face_imgs_dir = avatar_path / "face_imgs"
+    full_imgs_dir = avatar_path / "full_imgs"
+
+    image_dir = None
+    if face_imgs_dir.exists():
+        images = sorted(face_imgs_dir.glob("*.png"))
+        if images:
+            image_dir = "face_imgs"
+            image_name = images[0].name
+    elif full_imgs_dir.exists():
+        images = sorted(full_imgs_dir.glob("*.png"))
+        if images:
+            image_dir = "full_imgs"
+            image_name = images[0].name
+
+    if image_dir:
+        return f"/avatars/{avatar_id}/{image_dir}/{image_name}"
+    return None
+
+
 # ──────────────────────────────────────────────────────────────
 # 元数据 I/O
 # ──────────────────────────────────────────────────────────────
@@ -97,6 +128,8 @@ def list_avatars() -> list[dict]:
             if face_imgs.exists():
                 meta["frame_count"] = len(list(face_imgs.glob("*.png")))
             _write_meta(avatar_id, meta)
+        # 添加图片路径
+        meta["image_path"] = get_avatar_image_path(avatar_id)
         avatars.append(meta)
     return avatars
 
@@ -109,6 +142,8 @@ def get_avatar(avatar_id: str) -> Optional[dict]:
     meta = _read_meta(avatar_id)
     if meta is None:
         return None
+    # 添加图片路径
+    meta["image_path"] = get_avatar_image_path(avatar_id)
     return meta
 
 

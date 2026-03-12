@@ -90,16 +90,15 @@ export default function AvatarCreatePage() {
     <div
       style={{
         minHeight: '100vh',
-        background: 'linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%)',
+        background: '#ededed',
         padding: '0 0 60px',
       }}
     >
       {/* 顶部导航 */}
       <div
         style={{
-          background: 'rgba(255,255,255,0.06)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          background: '#fff',
+          borderBottom: '1px solid #e5e5e5',
           padding: '16px 32px',
           display: 'flex',
           alignItems: 'center',
@@ -110,10 +109,10 @@ export default function AvatarCreatePage() {
           icon={<ArrowLeftOutlined />}
           type="text"
           onClick={() => navigate('/avatars')}
-          style={{ color: 'rgba(255,255,255,0.7)' }}
+          style={{ color: '#666' }}
         />
-        <Title level={4} style={{ margin: 0, color: '#fff' }}>
-          <VideoCameraOutlined style={{ marginRight: 8, color: '#7c6aff' }} />
+        <Title level={4} style={{ margin: 0, color: '#333' }}>
+          <VideoCameraOutlined style={{ marginRight: 8, color: '#5b4aff' }} />
           新建数字人形象
         </Title>
       </div>
@@ -131,16 +130,16 @@ export default function AvatarCreatePage() {
         {step === 'done' && (
           <div
             style={{
-              background: 'rgba(82, 196, 26, 0.1)',
-              border: '1px solid rgba(82, 196, 26, 0.3)',
-              borderRadius: 16,
+              background: '#fff',
+              border: '1px solid #e5e5e5',
+              borderRadius: 12,
               padding: 40,
               textAlign: 'center',
             }}
           >
             <div style={{ fontSize: 56, marginBottom: 16 }}>🎉</div>
-            <Title level={3} style={{ color: '#fff', marginBottom: 8 }}>生成任务已启动！</Title>
-            <Text style={{ color: 'rgba(255,255,255,0.65)', display: 'block', marginBottom: 24 }}>
+            <Title level={3} style={{ color: '#333', marginBottom: 8 }}>生成任务已启动！</Title>
+            <Text style={{ color: '#999', display: 'block', marginBottom: 24 }}>
               数字人形象正在后台生成，通常需要 1~5 分钟，完成后状态将自动更新为"可用"。
             </Text>
             <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
@@ -149,9 +148,9 @@ export default function AvatarCreatePage() {
                 size="large"
                 onClick={() => navigate('/avatars')}
                 style={{
-                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  background: '#5b4aff',
                   border: 'none',
-                  borderRadius: 10,
+                  borderRadius: 8,
                 }}
               >
                 查看形象列表
@@ -164,7 +163,7 @@ export default function AvatarCreatePage() {
                   setVideoPreview('');
                   form.resetFields();
                 }}
-                style={{ borderRadius: 10 }}
+                style={{ borderRadius: 8 }}
               >
                 继续创建
               </Button>
@@ -178,10 +177,10 @@ export default function AvatarCreatePage() {
             <Progress
               type="circle"
               percent={progress}
-              strokeColor={{ '0%': '#667eea', '100%': '#764ba2' }}
+              strokeColor="#5b4aff"
             />
             <div style={{ marginTop: 24 }}>
-              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 16 }}>
+              <Text style={{ color: '#666', fontSize: 16 }}>
                 正在上传视频，请稍候...
               </Text>
             </div>
@@ -198,7 +197,7 @@ export default function AvatarCreatePage() {
             action={
               <Button onClick={() => setStep('upload')}>重新尝试</Button>
             }
-            style={{ marginBottom: 24, borderRadius: 12 }}
+            style={{ marginBottom: 24, borderRadius: 8 }}
           />
         )}
 
@@ -212,17 +211,17 @@ export default function AvatarCreatePage() {
             {/* 视频上传 */}
             <div
               style={{
-                background: 'rgba(255,255,255,0.05)',
-                borderRadius: 16,
+                background: '#fff',
+                borderRadius: 12,
                 padding: 24,
                 marginBottom: 24,
-                border: '1px solid rgba(255,255,255,0.1)',
+                border: '1px solid #e5e5e5',
               }}
             >
-              <Title level={5} style={{ color: '#fff', marginBottom: 16 }}>
+              <Title level={5} style={{ color: '#333', marginBottom: 16 }}>
                 1. 上传人物视频
               </Title>
-              <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, display: 'block', marginBottom: 16 }}>
+              <Text style={{ color: '#999', fontSize: 12, display: 'block', marginBottom: 16 }}>
                 支持 MP4 / MOV / AVI 格式，视频时长建议 5~60 秒，确保视频中有清晰的正面人脸。
               </Text>
 
@@ -232,18 +231,18 @@ export default function AvatarCreatePage() {
                   beforeUpload={handleVideoChange}
                   showUploadList={false}
                   style={{
-                    background: 'rgba(124,106,255,0.08)',
-                    borderColor: 'rgba(124,106,255,0.4)',
-                    borderRadius: 12,
+                    background: '#f5f5f5',
+                    borderColor: '#ddd',
+                    borderRadius: 8,
                   }}
                 >
-                  <p style={{ fontSize: 40, color: '#7c6aff' }}>
+                  <p style={{ fontSize: 40, color: '#5b4aff' }}>
                     <InboxOutlined />
                   </p>
-                  <p style={{ color: '#fff', fontSize: 16, fontWeight: 600, margin: '8px 0 4px' }}>
+                  <p style={{ color: '#333', fontSize: 16, fontWeight: 500, margin: '8px 0 4px' }}>
                     点击或拖拽视频文件到此处
                   </p>
-                  <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13 }}>
+                  <p style={{ color: '#999', fontSize: 13 }}>
                     MP4 / MOV / AVI，最大 500MB
                   </p>
                 </Dragger>
@@ -252,7 +251,7 @@ export default function AvatarCreatePage() {
                   <video
                     src={videoPreview}
                     controls
-                    style={{ width: '100%', borderRadius: 12, maxHeight: 280, objectFit: 'cover' }}
+                    style={{ width: '100%', borderRadius: 8, maxHeight: 280, objectFit: 'cover' }}
                   />
                   <Button
                     size="small"
@@ -269,18 +268,18 @@ export default function AvatarCreatePage() {
             {/* 形象配置 */}
             <div
               style={{
-                background: 'rgba(255,255,255,0.05)',
-                borderRadius: 16,
+                background: '#fff',
+                borderRadius: 12,
                 padding: 24,
-                border: '1px solid rgba(255,255,255,0.1)',
+                border: '1px solid #e5e5e5',
               }}
             >
-              <Title level={5} style={{ color: '#fff', marginBottom: 16 }}>
+              <Title level={5} style={{ color: '#333', marginBottom: 16 }}>
                 2. 配置形象信息
               </Title>
 
               <Form.Item
-                label={<span style={{ color: 'rgba(255,255,255,0.85)' }}>形象名称</span>}
+                label={<span style={{ color: '#666' }}>形象名称</span>}
                 name="name"
                 rules={[{ required: true, message: '请输入形象名称' }]}
               >
@@ -288,7 +287,7 @@ export default function AvatarCreatePage() {
               </Form.Item>
 
               <Form.Item
-                label={<span style={{ color: 'rgba(255,255,255,0.85)' }}>语音引擎 (TTS)</span>}
+                label={<span style={{ color: '#666' }}>语音引擎 (TTS)</span>}
                 name="tts_type"
                 rules={[{ required: true }]}
               >
@@ -304,7 +303,7 @@ export default function AvatarCreatePage() {
               </Form.Item>
 
               <Form.Item
-                label={<span style={{ color: 'rgba(255,255,255,0.85)' }}>语音 ID / Voice</span>}
+                label={<span style={{ color: '#666' }}>语音 ID / Voice</span>}
                 name="voice_id"
                 tooltip="不同 TTS 引擎的 Voice ID 格式不同，请参照对应服务文档"
               >
@@ -325,16 +324,13 @@ export default function AvatarCreatePage() {
                 onClick={handleSubmit}
                 disabled={!videoFile}
                 style={{
-                  background: videoFile
-                    ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
-                    : undefined,
+                  background: videoFile ? '#5b4aff' : undefined,
                   border: 'none',
-                  borderRadius: 12,
-                  height: 52,
+                  borderRadius: 8,
+                  height: 48,
                   paddingInline: 48,
                   fontSize: 16,
-                  fontWeight: 600,
-                  boxShadow: videoFile ? '0 4px 20px rgba(118,75,162,0.5)' : undefined,
+                  fontWeight: 500,
                 }}
               >
                 上传并生成数字人形象

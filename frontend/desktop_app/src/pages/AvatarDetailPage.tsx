@@ -39,6 +39,49 @@ const StatusTag = ({ status }: { status: AvatarMeta['status'] }) => {
   return <Tag icon={<ExclamationCircleOutlined />} color="error">生成失败</Tag>;
 };
 
+const AvatarImage = ({ avatar }: { avatar: AvatarMeta }) => {
+  const hasImage = avatar.image_path && avatar.status === 'ready';
+
+  if (hasImage) {
+    return (
+      <img
+        src={avatar.image_path}
+        alt={avatar.name}
+        style={{
+          width: 80,
+          height: 80,
+          borderRadius: '50%',
+          objectFit: 'cover',
+          flexShrink: 0,
+        }}
+        onError={(e) => {
+          e.currentTarget.style.display = 'none';
+          const fallback = e.currentTarget.parentElement?.querySelector('[data-fallback]');
+          if (fallback) (fallback as HTMLElement).style.display = 'flex';
+        }}
+      />
+    );
+  }
+
+  return (
+    <div
+      data-fallback
+      style={{ display: hasImage ? 'none' : 'flex' }}
+    >
+      <Avatar
+        size={80}
+        style={{
+          background: '#5b4aff',
+          fontSize: 36,
+          flexShrink: 0,
+        }}
+      >
+        {avatar.name.charAt(0).toUpperCase()}
+      </Avatar>
+    </div>
+  );
+};
+
 export default function AvatarDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -58,7 +101,7 @@ export default function AvatarDetailPage() {
       })
       .catch(() => setNotFound(true))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, form]);
 
   const handleSave = async () => {
     try {
@@ -74,16 +117,13 @@ export default function AvatarDetailPage() {
     }
   };
 
-  const gradientBg = 'linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%)';
-
   return (
-    <div style={{ minHeight: '100vh', background: gradientBg, padding: '0 0 60px' }}>
+    <div style={{ minHeight: '100vh', background: '#ededed', padding: '0 0 60px' }}>
       {/* 顶部导航 */}
       <div
         style={{
-          background: 'rgba(255,255,255,0.06)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid rgba(255,255,255,0.1)',
+          background: '#fff',
+          borderBottom: '1px solid #e5e5e5',
           padding: '16px 32px',
           display: 'flex',
           alignItems: 'center',
@@ -94,10 +134,10 @@ export default function AvatarDetailPage() {
           icon={<ArrowLeftOutlined />}
           type="text"
           onClick={() => navigate('/avatars')}
-          style={{ color: 'rgba(255,255,255,0.7)' }}
+          style={{ color: '#666' }}
         />
-        <Title level={4} style={{ margin: 0, color: '#fff' }}>
-          <UserOutlined style={{ marginRight: 8, color: '#7c6aff' }} />
+        <Title level={4} style={{ margin: 0, color: '#333' }}>
+          <UserOutlined style={{ marginRight: 8, color: '#5b4aff' }} />
           形象详情
         </Title>
       </div>
@@ -116,10 +156,10 @@ export default function AvatarDetailPage() {
         {loading && !notFound && (
           <div
             style={{
-              background: 'rgba(255,255,255,0.05)',
-              borderRadius: 16,
+              background: '#fff',
+              borderRadius: 12,
               padding: 32,
-              border: '1px solid rgba(255,255,255,0.1)',
+              border: '1px solid #e5e5e5',
             }}
           >
             <Skeleton active avatar={{ size: 80 }} paragraph={{ rows: 4 }} />
@@ -131,29 +171,20 @@ export default function AvatarDetailPage() {
             {/* 形象头像与基础信息 */}
             <div
               style={{
-                background: 'rgba(255,255,255,0.05)',
-                borderRadius: 16,
+                background: '#fff',
+                borderRadius: 12,
                 padding: 32,
-                border: '1px solid rgba(255,255,255,0.1)',
+                border: '1px solid #e5e5e5',
                 marginBottom: 24,
                 display: 'flex',
                 alignItems: 'center',
                 gap: 24,
               }}
             >
-              <Avatar
-                size={80}
-                style={{
-                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                  fontSize: 36,
-                  flexShrink: 0,
-                }}
-              >
-                {avatar.name.charAt(0).toUpperCase()}
-              </Avatar>
+              <AvatarImage avatar={avatar} />
               <div style={{ flex: 1 }}>
                 <Space align="center" style={{ marginBottom: 8 }}>
-                  <Title level={3} style={{ margin: 0, color: '#fff' }}>
+                  <Title level={3} style={{ margin: 0, color: '#333' }}>
                     {avatar.name}
                   </Title>
                   <StatusTag status={avatar.status} />
@@ -161,11 +192,11 @@ export default function AvatarDetailPage() {
                 <Descriptions
                   column={1}
                   size="small"
-                  labelStyle={{ color: 'rgba(255,255,255,0.45)', minWidth: 80 }}
-                  contentStyle={{ color: 'rgba(255,255,255,0.7)' }}
+                  labelStyle={{ color: '#999', minWidth: 80 }}
+                  contentStyle={{ color: '#666' }}
                 >
                   <Descriptions.Item label="ID">
-                    <Text code style={{ color: '#a78bfa' }}>{avatar.avatar_id}</Text>
+                    <Text code style={{ color: '#5b4aff' }}>{avatar.avatar_id}</Text>
                   </Descriptions.Item>
                   <Descriptions.Item label="帧数">
                     {avatar.frame_count != null && avatar.frame_count > 0 ? `${avatar.frame_count} 帧` : '—'}
@@ -190,19 +221,19 @@ export default function AvatarDetailPage() {
             {/* 编辑表单 */}
             <div
               style={{
-                background: 'rgba(255,255,255,0.05)',
-                borderRadius: 16,
+                background: '#fff',
+                borderRadius: 12,
                 padding: 32,
-                border: '1px solid rgba(255,255,255,0.1)',
+                border: '1px solid #e5e5e5',
               }}
             >
-              <Title level={5} style={{ color: '#fff', marginBottom: 24 }}>
+              <Title level={5} style={{ color: '#333', marginBottom: 24 }}>
                 编辑配置
               </Title>
 
               <Form form={form} layout="vertical">
                 <Form.Item
-                  label={<span style={{ color: 'rgba(255,255,255,0.85)' }}>形象名称</span>}
+                  label={<span style={{ color: '#666' }}>形象名称</span>}
                   name="name"
                   rules={[{ required: true, message: '请输入形象名称' }]}
                 >
@@ -210,7 +241,7 @@ export default function AvatarDetailPage() {
                 </Form.Item>
 
                 <Form.Item
-                  label={<span style={{ color: 'rgba(255,255,255,0.85)' }}>语音引擎 (TTS)</span>}
+                  label={<span style={{ color: '#666' }}>语音引擎 (TTS)</span>}
                   name="tts_type"
                   rules={[{ required: true }]}
                 >
@@ -218,7 +249,7 @@ export default function AvatarDetailPage() {
                 </Form.Item>
 
                 <Form.Item
-                  label={<span style={{ color: 'rgba(255,255,255,0.85)' }}>语音 ID / Voice ID</span>}
+                  label={<span style={{ color: '#666' }}>语音 ID / Voice ID</span>}
                   name="voice_id"
                   tooltip="语音 ID 与所选 TTS 引擎对应，如 Edge TTS 使用 zh-CN-XiaoxiaoNeural"
                 >
@@ -237,7 +268,7 @@ export default function AvatarDetailPage() {
                       loading={saving}
                       size="large"
                       style={{
-                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                        background: '#5b4aff',
                         border: 'none',
                         borderRadius: 8,
                       }}

@@ -10,6 +10,7 @@ export interface AvatarMeta {
   status: 'creating' | 'ready' | 'error';
   error?: string | null;
   frame_count?: number;
+  image_path?: string | null;
 }
 
 export const listAvatars = async (): Promise<AvatarMeta[]> => {

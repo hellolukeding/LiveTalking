@@ -62,6 +62,10 @@ from basereal import BaseReal
 from llm import llm_response
 from logger import logger
 from webrtc import HumanPlayer
+from avatar_manager import (
+    list_avatars, get_avatar, update_avatar, delete_avatar,
+    generate_avatar_async
+)
 
 load_dotenv()
 
@@ -762,6 +766,179 @@ async def speech_recognize(request):
         )
 
 
+# ──────────────────────────────────────────────
+# Avatar API endpoint handlers
+# ──────────────────────────────────────────────
+
+async def avatars_list(request):
+    """GET /avatars — 返回所有形象列表"""
+    try:
+        avatars = list_avatars()
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": 0, "data": avatars}, ensure_ascii=False)
+        )
+    except Exception as e:
+        logger.exception(f"[AVATARS] list error: {e}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+            status=500
+        )
+
+
+async def avatar_get(request):
+    """GET /avatars/{id} — 返回单个形象"""
+    try:
+        avatar_id = request.match_info.get("avatar_id", "")
+        meta = get_avatar(avatar_id)
+        if meta is None:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Avatar not found"}),
+                status=404
+            )
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": 0, "data": meta}, ensure_ascii=False)
+        )
+    except Exception as e:
+        logger.exception(f"[AVATARS] get error: {e}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+            status=500
+        )
+
+
+async def avatar_create(request):
+    """POST /avatars — 上传视频并触发形象生成"""
+    try:
+        reader = await request.multipart()
+
+        avatar_id = None
+        name = None
+        tts_type = "edge"
+        voice_id = "zh-CN-XiaoxiaoNeural"
+        video_path = None
+
+        async for field in reader:
+            if field.name == "avatar_id":
+                avatar_id = (await field.read()).decode("utf-8").strip()
+            elif field.name == "name":
+                name = (await field.read()).decode("utf-8").strip()
+            elif field.name == "tts_type":
+                tts_type = (await field.read()).decode("utf-8").strip()
+            elif field.name == "voice_id":
+                voice_id = (await field.read()).decode("utf-8").strip()
+            elif field.name == "video":
+                import uuid
+                if not avatar_id:
+                    avatar_id = f"avatar_{uuid.uuid4().hex[:8]}"
+                uploads_dir = "data/uploads"
+                os.makedirs(uploads_dir, exist_ok=True)
+                filename = field.filename or f"{avatar_id}.mp4"
+                video_path = os.path.join(uploads_dir, f"{avatar_id}_{filename}")
+                with open(video_path, "wb") as f:
+                    while True:
+                        chunk = await field.read_chunk(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+
+        if not avatar_id or not name:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "avatar_id and name are required"}),
+                status=400
+            )
+        if not video_path or not os.path.exists(video_path):
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Video file is required"}),
+                status=400
+            )
+
+        # 在后台异步生成（不阻塞响应）
+        async def _run_gen():
+            try:
+                await generate_avatar_async(
+                    avatar_id, video_path, name, tts_type, voice_id)
+                try:
+                    os.remove(video_path)
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error(f"[AVATAR_GEN] Generation failed for {avatar_id}: {e}")
+
+        asyncio.create_task(_run_gen())
+
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({
+                "code": 0,
+                "msg": "Generation started",
+                "data": {"avatar_id": avatar_id, "status": "creating"}
+            }, ensure_ascii=False)
+        )
+    except Exception as e:
+        logger.exception(f"[AVATARS] create error: {e}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+            status=500
+        )
+
+
+async def avatar_update(request):
+    """PUT /avatars/{id} — 更新形象元数据（名称/语音绑定）"""
+    try:
+        avatar_id = request.match_info.get("avatar_id", "")
+        params = await request.json()
+        updated = update_avatar(avatar_id, params)
+        if updated is None:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Avatar not found"}),
+                status=404
+            )
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": 0, "data": updated}, ensure_ascii=False)
+        )
+    except Exception as e:
+        logger.exception(f"[AVATARS] update error: {e}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+            status=500
+        )
+
+
+async def avatar_delete(request):
+    """DELETE /avatars/{id} — 删除形象"""
+    try:
+        avatar_id = request.match_info.get("avatar_id", "")
+        ok = delete_avatar(avatar_id)
+        if not ok:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Avatar not found"}),
+                status=404
+            )
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": 0, "msg": "Deleted"})
+        )
+    except Exception as e:
+        logger.exception(f"[AVATARS] delete error: {e}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+            status=500
+        )
+
+
 async def on_shutdown(app):
     # 关闭对等连接
     coros = [pc.close() for pc in pcs]
@@ -932,6 +1109,17 @@ if __name__ == '__main__':
     appasync.router.add_post("/interrupt_talk", interrupt_talk)
     appasync.router.add_post("/is_speaking", is_speaking)
     appasync.router.add_post("/speech_recognize", speech_recognize)
+
+    # Avatar 管理路由
+    appasync.router.add_get("/avatars", avatars_list)
+    appasync.router.add_post("/avatars", avatar_create)
+    appasync.router.add_get("/avatars/{avatar_id}", avatar_get)
+    appasync.router.add_put("/avatars/{avatar_id}", avatar_update)
+    appasync.router.add_delete("/avatars/{avatar_id}", avatar_delete)
+    # Avatar 静态资源（图片等）
+    appasync.router.add_static("/avatars/", path="data/avatars", name="avatar_static")
+
+
     appasync.router.add_static('/', path='frontend/web')
 
     # 配置默认CORS设置

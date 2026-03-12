@@ -1,3 +1,17 @@
+
+# 启动前依赖检查
+import subprocess
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent
+dep_check_script = project_root / "scripts" / "ensure_deps.py"
+if dep_check_script.exists():
+    result = subprocess.run([sys.executable, str(dep_check_script)],
+                                  capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stdout)
+        sys.exit(1)
+
 ###############################################################################
 #  Copyright (C) 2024 LiveTalking@lipku https://github.com/lipku/LiveTalking
 #  email: lipku@foxmail.com
@@ -16,6 +30,8 @@
 ###############################################################################
 
 import argparse
+# Global args (set after parse_args())
+args = None
 import asyncio
 import base64
 import gc
@@ -37,6 +53,7 @@ from aiohttp import web
 from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
                     RTCSessionDescription)
 from aiortc.rtcrtpsender import RTCRtpSender
+from aiortc.rtcrtpparameters import RTCRtpParameters, RTCRtpEncodingParameters
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_sockets import Sockets
@@ -153,9 +170,25 @@ async def offer(request):
 
         # Create WebRTC peer connection
         try:
-            ice_server = RTCIceServer(urls='stun:stun.qq.com:3478')
+            # 国内 STUN 服务器列表 (提高连接成功率)
+            ice_servers = [
+                # 腾讯云 STUN (主要)
+                RTCIceServer(urls='stun:stun.qq.com:3478'),
+                
+                # 阿里云 STUN (备用)
+                RTCIceServer(urls='stun:stun.aliyun.com:3478'),
+                
+                # 网易蜂信 STUN (备用)
+                RTCIceServer(urls='stun:stun.miwifi.com:3478'),
+                
+                # Cloudflare STUN (国际备用，国内访问也较快)
+                RTCIceServer(urls='stun:stun.cloudflare.com:3478'),
+                
+                # Google STUN (国际备用)
+                RTCIceServer(urls='stun:stun.l.google.com:19302'),
+            ]
             pc = RTCPeerConnection(
-                configuration=RTCConfiguration(iceServers=[ice_server]))
+                configuration=RTCConfiguration(iceServers=ice_servers))
             pcs.add(pc)
             logger.debug(
                 f"[OFFER] WebRTC peer connection created for session {sessionid}")
@@ -290,22 +323,78 @@ async def offer(request):
                 status=500
             )
 
-        # Configure codec preferences
+        # Configure codec preferences and bitrate
         try:
             capabilities = RTCRtpSender.getCapabilities("video")
-            preferences = list(
-                filter(lambda x: x.name == "H264", capabilities.codecs))
-            preferences += list(filter(lambda x: x.name ==
-                                "VP8", capabilities.codecs))
-            preferences += list(filter(lambda x: x.name ==
-                                "rtx", capabilities.codecs))
-            transceiver = pc.getTransceivers()[1]
-            transceiver.setCodecPreferences(preferences)
-            logger.debug(
-                f"[OFFER] Codec preferences configured for session {sessionid}")
+            
+            # Build codec preferences based on args.video_codec
+            video_codec = args.video_codec
+            preferences = []
+            
+            if video_codec == 'auto':
+                # Auto: prefer VP9 > H264 > VP8 (best quality first)
+                preferences = list(filter(lambda x: x.name == "VP9", capabilities.codecs))
+                preferences += list(filter(lambda x: x.name == "H264", capabilities.codecs))
+                preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
+            elif video_codec == 'H264':
+                preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
+            elif video_codec == 'VP8':
+                preferences = list(filter(lambda x: x.name == "VP8", capabilities.codecs))
+            elif video_codec == 'VP9':
+                preferences = list(filter(lambda x: x.name == "VP9", capabilities.codecs))
+            
+            # Always add rtx for retransmission
+            preferences += list(filter(lambda x: x.name == "rtx", capabilities.codecs))
+            
+            # Get video transceiver (index 1, after audio)
+            transceivers = pc.getTransceivers()
+            video_transceiver = None
+            for t in transceivers:
+                if t.receiver.track and t.receiver.track.kind == 'video':
+                    video_transceiver = t
+                    break
+            
+            if video_transceiver:
+                video_transceiver.setCodecPreferences(preferences)
+                logger.debug(
+                    f"[OFFER] Codec preferences configured: {[c.name for c in preferences[:3]]} for session {sessionid}")
+                
+                # Set bitrate parameters for all video senders
+                video_bitrate_bps = args.video_bitrate * 1000  # Convert kbps to bps
+                
+                for sender in pc.getSenders():
+                    if sender.track and sender.track.kind == 'video':
+                        # Set encoding parameters
+                        parameters = sender.getParameters()
+                        if parameters and parameters.encodings:
+                            # Update existing encoding parameters
+                            for encoding in parameters.encodings:
+                                encoding.maxBitrate = video_bitrate_bps
+                                # Disable scale resolution down by default
+                                encoding.scaleResolutionDownBy = 1
+                            
+                            sender.setParameters(parameters)
+                            logger.info(
+                                f"[OFFER] Video bitrate set to {args.video_bitrate} kbps for session {sessionid}")
+                        else:
+                            # Fallback: create new parameters
+                            from aiortc.rtcrtpparameters import RTCRtpEncodingParameters
+                            encodings = [RTCRtpEncodingParameters(
+                                maxBitrate=video_bitrate_bps,
+                                scaleResolutionDownBy=1
+                            )]
+                            parameters = RTCRtpParameters(encodings=encodings)
+                            sender.setParameters(parameters)
+                            logger.info(
+                                f"[OFFER] Video bitrate set to {args.video_bitrate} kbps (new params) for session {sessionid}")
+            else:
+                logger.warning(f"[OFFER] No video transceiver found for session {sessionid}")
+                
         except Exception as e:
             logger.warning(
-                f"[OFFER] Failed to configure codec preferences: {str(e)}")
+                f"[OFFER] Failed to configure codec/bitrate: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
 
         # Set remote description
         try:
@@ -747,6 +836,13 @@ if __name__ == '__main__':
 
     parser.add_argument('--W', type=int, default=450, help="GUI width")
     parser.add_argument('--H', type=int, default=450, help="GUI height")
+    
+    # WebRTC video bitrate control
+    parser.add_argument('--video_bitrate', type=int, default=3000,
+                        help="Video bitrate in kbps (default: 3000, recommended: 2000-5000)")
+    parser.add_argument('--video_codec', type=str, default='auto',
+                        choices=['auto', 'H264', 'VP8', 'VP9'],
+                        help="Video codec preference (default: auto)")
 
     # musetalk opt
     parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
@@ -788,7 +884,8 @@ if __name__ == '__main__':
     parser.add_argument('--asr', type=str, default=None,
                         help="ASR service type (from env ASR_TYPE)")
 
-    opt = parser.parse_args()
+    args = parser.parse_args()
+    opt = args
     # app.config.from_object(opt)
     # print(app.config)
     opt.customopt = []

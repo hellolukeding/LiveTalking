@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  livetalking-frontend:
+    build:
+      context: ../../frontend/desktop_app
+      dockerfile: ../../deploy/frontend/Dockerfile
+    container_name: livetalking-frontend
+    restart: unless-stopped
+    ports:
+      - "1420:1420"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - livetalking-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:1420/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.livetalking.description=LiveTalking Frontend"
+      - "com.livetalking.service=frontend"
+
+networks:
+  livetalking-network:
+    driver: bridge
+    name: livetalking-network

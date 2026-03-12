@@ -1,0 +1,41 @@
+[Unit]
+Description=LiveTalking Digital Human Backend Service
+Documentation=https://github.com/hellolukeding/LiveTalking
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=root
+Group=root
+WorkingDirectory=/opt/2026/LiveTalking
+Environment="PATH=/opt/2026/LiveTalking/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/opt/2026/LiveTalking:/opt/2026/LiveTalking/src:/opt/2026/LiveTalking/src/main:/opt/2026/LiveTalking/src/core:/opt/2026/LiveTalking/src/utils:/opt/2026/LiveTalking/src/services"
+EnvironmentFile=-/opt/2026/LiveTalking/deploy/livetalking.conf
+
+# 从配置文件读取参数
+ExecStart=/opt/2026/LiveTalking/deploy/backend.sh start
+ExecStop=/opt/2026/LiveTalking/deploy/backend.sh stop
+ExecReload=/opt/2026/LiveTalking/deploy/backend.sh restart
+PIDFile=/opt/2026/LiveTalking/livetalking.pid
+
+# 重启策略
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# 日志
+StandardOutput=append:/opt/2026/LiveTalking/logs/systemd.log
+StandardError=append:/opt/2026/LiveTalking/logs/systemd.error.log
+
+[Install]
+WantedBy=multi-user.target

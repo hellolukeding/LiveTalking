@@ -913,8 +913,8 @@ async def avatar_create(request):
 
         avatar_id = None
         name = None
-        tts_type = "edge"
-        voice_id = "zh-CN-XiaoxiaoNeural"
+        tts_type = "doubao"  # 默认使用 doubao
+        voice_id = "zh_female_wenroushunshun_mars_bigtts"  # 默认语音
         video_path = None
 
         async for field in reader:

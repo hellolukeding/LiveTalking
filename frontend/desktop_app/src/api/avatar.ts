@@ -41,3 +41,11 @@ export const updateAvatar = async (
 export const deleteAvatar = async (id: string): Promise<void> => {
   await client.delete(`/avatars/${id}`);
 };
+
+export const previewVoiceTTS = async (voiceId: string): Promise<string> => {
+  const res = await client.post('/preview_voice', { voice_id: voiceId }, {
+    responseType: 'blob',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return URL.createObjectURL(new Blob([res.data], { type: 'audio/mpeg' }));
+};

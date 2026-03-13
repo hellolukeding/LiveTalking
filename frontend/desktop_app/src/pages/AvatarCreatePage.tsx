@@ -9,7 +9,7 @@ import {
 import { Alert, Button, Form, Input, Progress, Select, Space, Steps, Tooltip, Typography, Upload, message as antMessage } from 'antd';
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createAvatar } from '../api/avatar';
+import { createAvatar, previewVoiceTTS } from '../api/avatar';
 
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
@@ -42,6 +42,7 @@ export default function AvatarCreatePage() {
   const [selectedVoice, setSelectedVoice] = useState(DEFAULT_VOICE_ID);
   const [customVoice, setCustomVoice] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [step, setStep] = useState<Step>('upload');
   const [progress, setProgress] = useState(0);
   const [createdId, setCreatedId] = useState('');
@@ -93,6 +94,27 @@ export default function AvatarCreatePage() {
       setStep('error');
       const errorMessage = e instanceof Error ? e.message : String(e);
       antMessage.error('创建失败: ' + errorMessage);
+    }
+  };
+
+  const handlePreviewVoice = async (voiceId: string) => {
+    if (!voiceId || voiceId === '__custom__' || previewLoading) {
+      return;
+    }
+
+    setPreviewLoading(true);
+    try {
+      const audioUrl = await previewVoiceTTS(voiceId);
+      const audio = new Audio(audioUrl);
+      audio.play();
+
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+      };
+    } catch (e) {
+      antMessage.error('试听失败: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -351,6 +373,14 @@ export default function AvatarCreatePage() {
                     style={{ flex: 1 }}
                     size="large"
                   />
+                  <Button
+                    icon={<SoundOutlined />}
+                    onClick={() => handlePreviewVoice(selectedVoice)}
+                    disabled={selectedVoice === '__custom__' || !selectedVoice || previewLoading}
+                    loading={previewLoading}
+                  >
+                    试听
+                  </Button>
                 </Space.Compact>
               </Form.Item>
 

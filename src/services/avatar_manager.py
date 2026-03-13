@@ -7,7 +7,9 @@ Avatar Manager Service
 
 import asyncio
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,29 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def validate_avatar_id(avatar_id: str) -> bool:
+    """
+    Validate avatar_id format to prevent path traversal attacks.
+
+    Args:
+        avatar_id: The avatar ID to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not avatar_id or not isinstance(avatar_id, str):
+        return False
+    # Only allow alphanumeric, underscore, and hyphen
+    # This matches the validation done in lipreal.py
+    if not re.match(r'^[a-zA-Z0-9_-]+$', avatar_id):
+        return False
+    if len(avatar_id) > 64:  # Reasonable max length
+        return False
+    return True
 
 
 # 数据目录（相对于项目根目录）
@@ -26,6 +51,8 @@ def get_avatars_root() -> Path:
 
 
 def get_avatar_path(avatar_id: str) -> Path:
+    if not validate_avatar_id(avatar_id):
+        raise ValueError(f"Invalid avatar_id format: {avatar_id}")
     return get_avatars_root() / avatar_id
 
 
@@ -72,8 +99,8 @@ def _default_meta(avatar_id: str, name: str) -> dict:
     return {
         "avatar_id": avatar_id,
         "name": name,
-        "tts_type": "edge",
-        "voice_id": "zh-CN-XiaoxiaoNeural",
+        "tts_type": "doubao",  # Changed from "edge"
+        "voice_id": "zh_female_wenroushunshun_mars_bigtts",  # Changed default
         "created_at": datetime.now().isoformat(),
         "status": "ready",   # creating | ready | error
         "error": None,
@@ -136,6 +163,9 @@ def list_avatars() -> list[dict]:
 
 def get_avatar(avatar_id: str) -> Optional[dict]:
     """返回单个形象元数据，不存在则返回 None。"""
+    if not validate_avatar_id(avatar_id):
+        logger.warning(f"[AVATAR] Invalid avatar_id format: {avatar_id}")
+        return None
     avatar_path = get_avatar_path(avatar_id)
     if not avatar_path.exists():
         return None
@@ -168,6 +198,9 @@ def update_avatar(avatar_id: str, updates: dict) -> Optional[dict]:
 
 def delete_avatar(avatar_id: str) -> bool:
     """删除形象目录，成功返回 True，不存在返回 False。"""
+    if not validate_avatar_id(avatar_id):
+        logger.warning(f"[AVATAR] Invalid avatar_id format: {avatar_id}")
+        return False
     avatar_path = get_avatar_path(avatar_id)
     if not avatar_path.exists():
         return False
@@ -176,11 +209,14 @@ def delete_avatar(avatar_id: str) -> bool:
 
 
 def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
-                         tts_type: str = "edge", voice_id: str = "zh-CN-XiaoxiaoNeural"):
+                         tts_type: str = "doubao",  # Changed default
+                         voice_id: str = "zh_female_wenroushunshun_mars_bigtts"):  # Changed default
     """
-    同步调用 wav2lip/genavatar.py 生成数字人形象。
+    同步调用 wav2lip/genavatar384.py 生成数字人形象。
     此函数在后台线程中执行，会修改 meta.json 中的 status 字段。
     """
+    if not validate_avatar_id(avatar_id):
+        raise ValueError(f"Invalid avatar_id format: {avatar_id}")
     avatar_path = get_avatar_path(avatar_id)
     avatar_path.mkdir(parents=True, exist_ok=True)
 
@@ -188,7 +224,7 @@ def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
     meta = {
         "avatar_id": avatar_id,
         "name": name,
-        "tts_type": tts_type,
+        "tts_type": "doubao",  # Changed from tts_type parameter
         "voice_id": voice_id,
         "created_at": datetime.now().isoformat(),
         "status": "creating",
@@ -199,17 +235,18 @@ def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
 
     try:
         project_root = Path(__file__).parent.parent.parent
-        genavatar_script = project_root / "wav2lip" / "genavatar.py"
+        # Changed from "genavatar.py" to "genavatar384.py"
+        genavatar_script = project_root / "wav2lip" / "genavatar384.py"
 
-        # 覆盖 genavatar.py 的输出目录到 data/avatars/
-        # genavatar.py 默认输出到 ./results/avatars/{avatar_id}，
-        # 我们通过软链或直接修改路径；这里使用 img_size=96
+        # 覆盖 genavatar384.py 的输出目录到 data/avatars/
+        # genavatar384.py 默认输出到 ./results/avatars/{avatar_id}，
+        # 我们通过软链或直接修改路径；这里使用 img_size=384
         cmd = [
             sys.executable,
             str(genavatar_script),
             "--avatar_id", avatar_id,
             "--video_path", video_path,
-            "--img_size", "96",
+            "--img_size", "384",  # Changed from "96" to "384"
         ]
 
         result = subprocess.run(
@@ -223,7 +260,7 @@ def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
         if result.returncode != 0:
             raise RuntimeError(result.stderr or "genavatar process failed")
 
-        # genavatar.py 把产物写进了 ./results/avatars/{avatar_id}
+        # genavatar384.py 把产物写进了 ./results/avatars/{avatar_id}
         # 把产物移动到正确位置 data/avatars/{avatar_id}
         gen_output = project_root / "results" / "avatars" / avatar_id
         target = avatar_path
@@ -267,7 +304,8 @@ def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
 
 
 async def generate_avatar_async(avatar_id: str, video_path: str, name: str,
-                                 tts_type: str = "edge", voice_id: str = "zh-CN-XiaoxiaoNeural"):
+                                 tts_type: str = "doubao",  # Changed default
+                                 voice_id: str = "zh_female_wenroushunshun_mars_bigtts"):  # Changed default
     """在 executor 线程中异步运行 generate_avatar_sync。"""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(

@@ -30,5 +30,22 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+    proxy: {
+      '/offer': 'http://localhost:8011',
+      '/human': 'http://localhost:8011',
+      '/record': 'http://localhost:8011',
+      '/is_speaking': 'http://localhost:8011',
+      '/preview_voice': 'http://localhost:8011',
+      '/speech_recognize': 'http://localhost:8011',
+      '/humanaudio': 'http://localhost:8011',
+      '/interrupt_talk': 'http://localhost:8011',
+      '/set_audiotype': 'http://localhost:8011',
+      // Avatar API and static files (images)
+      '^/avatars/.*': {
+        target: 'http://localhost:8011',
+        changeOrigin: true,
+      },
+      '/avatars': 'http://localhost:8011',
+    },
   },
 }));

@@ -3,6 +3,7 @@ import {
   DeleteOutlined,
   EditOutlined,
   ExclamationCircleOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   SyncOutlined,
   UserOutlined,
@@ -14,6 +15,19 @@ import { useNavigate } from 'react-router-dom';
 import { AvatarMeta, deleteAvatar, listAvatars } from '../api/avatar';
 
 const { Title, Text } = Typography;
+
+// 颜色常量
+const COLORS = {
+  primary: '#5b4aff',
+  success: '#52c41a',
+  danger: '#fa5151',
+  textPrimary: '#333',
+  textSecondary: '#999',
+  textMuted: '#bbb',
+  background: '#ededed',
+  cardBg: '#fff',
+  border: '#e5e5e5',
+} as const;
 
 const TTS_LABELS: Record<string, string> = {
   doubao: 'Doubao TTS',
@@ -64,7 +78,7 @@ const AvatarCardCover = ({ avatar }: { avatar: AvatarMeta }) => {
       <Avatar
         size={80}
         style={{
-          background: '#5b4aff',
+          background: COLORS.primary,
           fontSize: 36,
         }}
       >
@@ -130,6 +144,15 @@ export default function AvatarListPage() {
     });
   };
 
+  const handleSelect = (avatar: AvatarMeta) => {
+    if (avatar.status !== 'ready') {
+      message.warning('形象尚未生成完成，请稍后再试');
+      return;
+    }
+    message.success(`已选择「${avatar.name}」，正在跳转...`);
+    navigate(`/?avatar_id=${avatar.avatar_id}`);
+  };
+
   return (
     <div
       style={{
@@ -160,7 +183,7 @@ export default function AvatarListPage() {
           </Button>
           <span style={{ color: '#ddd' }}>|</span>
           <Title level={4} style={{ margin: 0, color: '#333' }}>
-            <UserOutlined style={{ marginRight: 8, color: '#5b4aff' }} />
+            <UserOutlined style={{ marginRight: 8, color: COLORS.primary }} />
             数字人形象管理
           </Title>
         </div>
@@ -170,7 +193,7 @@ export default function AvatarListPage() {
           size="large"
           onClick={() => navigate('/avatars/create')}
           style={{
-            background: '#5b4aff',
+            background: COLORS.primary,
             border: 'none',
             borderRadius: 8,
             fontWeight: 500,
@@ -228,15 +251,21 @@ export default function AvatarListPage() {
                     </div>
                   }
                   actions={[
+                    <Tooltip title="使用该形象" key="select">
+                      <PlayCircleOutlined
+                        style={{ color: COLORS.success, fontSize: 18 }}
+                        onClick={() => handleSelect(avatar)}
+                      />
+                    </Tooltip>,
                     <Tooltip title="编辑/查看详情" key="edit">
                       <EditOutlined
-                        style={{ color: '#5b4aff', fontSize: 16 }}
+                        style={{ color: COLORS.primary, fontSize: 16 }}
                         onClick={() => navigate(`/avatars/${avatar.avatar_id}`)}
                       />
                     </Tooltip>,
                     <Tooltip title="删除形象" key="delete">
                       <DeleteOutlined
-                        style={{ color: '#fa5151', fontSize: 16 }}
+                        style={{ color: COLORS.danger, fontSize: 16 }}
                         onClick={() => handleDelete(avatar)}
                       />
                     </Tooltip>,

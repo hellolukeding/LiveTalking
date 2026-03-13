@@ -7,7 +7,7 @@ import {
   SoundOutlined,
 } from '@ant-design/icons';
 import { Alert, Button, Form, Input, Progress, Select, Space, Steps, Tooltip, Typography, Upload, message as antMessage } from 'antd';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createAvatar, previewVoiceTTS } from '../api/avatar';
 
@@ -43,6 +43,8 @@ export default function AvatarCreatePage() {
   const [customVoice, setCustomVoice] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
   const [step, setStep] = useState<Step>('upload');
   const [progress, setProgress] = useState(0);
   const [createdId, setCreatedId] = useState('');
@@ -55,6 +57,22 @@ export default function AvatarCreatePage() {
       }
     };
   }, [videoPreview]);
+
+  // Cleanup audio resources on unmount
+  useEffect(() => {
+    return () => {
+      // Stop any playing audio
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      // Revoke blob URL
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
+  }, []);
 
   const handleVideoChange = (file: File) => {
     setVideoFile(file);
@@ -98,6 +116,17 @@ export default function AvatarCreatePage() {
   };
 
   const handlePreviewVoice = async (voiceId: string) => {
+    // Stop any currently playing audio
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    // Revoke previous blob URL if exists
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+
     if (!voiceId || voiceId === '__custom__' || previewLoading) {
       return;
     }
@@ -105,11 +134,33 @@ export default function AvatarCreatePage() {
     setPreviewLoading(true);
     try {
       const audioUrl = await previewVoiceTTS(voiceId);
+      
+      // Store refs for cleanup
+      blobUrlRef.current = audioUrl;
       const audio = new Audio(audioUrl);
-      audio.play();
+      audioRef.current = audio;
+      
+      // Handle play() promise rejection
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((error) => {
+          console.error('Audio play failed:', error);
+          // Clean up on failure
+          if (blobUrlRef.current) {
+            URL.revokeObjectURL(blobUrlRef.current);
+            blobUrlRef.current = null;
+          }
+          antMessage.error('音频播放失败，请检查浏览器自动播放设置');
+        });
+      }
 
       audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
+        // Clean up when audio finishes playing
+        audioRef.current = null;
+        if (blobUrlRef.current) {
+          URL.revokeObjectURL(blobUrlRef.current);
+          blobUrlRef.current = null;
+        }
       };
     } catch (e) {
       antMessage.error('试听失败: ' + (e instanceof Error ? e.message : String(e)));

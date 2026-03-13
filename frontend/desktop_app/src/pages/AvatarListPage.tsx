@@ -16,10 +16,8 @@ import { AvatarMeta, deleteAvatar, listAvatars } from '../api/avatar';
 const { Title, Text } = Typography;
 
 const TTS_LABELS: Record<string, string> = {
-  edge: 'Edge TTS',
   doubao: 'Doubao TTS',
-  tencent: '腾讯 TTS',
-  azure: 'Azure TTS',
+  // Removed: edge, tencent, azure (no longer supported)
 };
 
 const StatusBadge = ({ status }: { status: AvatarMeta['status'] }) => {

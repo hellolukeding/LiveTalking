@@ -7,7 +7,7 @@ import {
   SoundOutlined,
 } from '@ant-design/icons';
 import { Alert, Button, Form, Input, Progress, Select, Space, Steps, Tooltip, Typography, Upload, message as antMessage } from 'antd';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createAvatar } from '../api/avatar';
 
@@ -44,7 +44,16 @@ export default function AvatarCreatePage() {
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [step, setStep] = useState<Step>('upload');
   const [progress, setProgress] = useState(0);
-  const [, setCreatedId] = useState('');
+  const [createdId, setCreatedId] = useState('');
+
+  // Cleanup video preview URL on unmount
+  useEffect(() => {
+    return () => {
+      if (videoPreview) {
+        URL.revokeObjectURL(videoPreview);
+      }
+    };
+  }, [videoPreview]);
 
   const handleVideoChange = (file: File) => {
     setVideoFile(file);
@@ -80,9 +89,10 @@ export default function AvatarCreatePage() {
       setCreatedId(result.avatar_id);
       setStep('done');
 
-    } catch (e: any) {
+    } catch (e) {
       setStep('error');
-      antMessage.error('创建失败: ' + (e?.message ?? String(e)));
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      antMessage.error('创建失败: ' + errorMessage);
     }
   };
 

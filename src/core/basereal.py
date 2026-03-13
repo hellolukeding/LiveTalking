@@ -153,6 +153,14 @@ class BaseReal:
         """
         logger.info(f"[BaseReal] stop_all_threads called for session {self.sessionid}")
 
+        # 🆕 首先停止 TTS，避免产生新的音频数据
+        try:
+            if self.tts and hasattr(self.tts, 'stop'):
+                logger.debug(f"[BaseReal] Stopping TTS for session {self.sessionid}")
+                self.tts.stop()
+        except Exception as e:
+            logger.debug(f"[BaseReal] Error stopping TTS: {e}")
+
         # 停止所有退出事件
         render_quit = self._render_quit_event
         if render_quit:
@@ -175,6 +183,12 @@ class BaseReal:
         except Exception:
             pass
 
+        # 🆕 停止 audio_out_worker
+        try:
+            self._audio_out_started = False
+        except Exception:
+            pass
+
         # 等待线程结束（带超时避免永久阻塞）
         infer_thread = getattr(self, '_infer_thread', None)
         if infer_thread and infer_thread.is_alive():
@@ -191,6 +205,33 @@ class BaseReal:
         metrics_thread = getattr(self, '_metrics_thread', None)
         if metrics_thread and metrics_thread.is_alive():
             metrics_thread.join(timeout=1.0)
+
+        audio_out_thread = getattr(self, '_audio_out_thread', None)
+        if audio_out_thread and audio_out_thread.is_alive():
+            audio_out_thread.join(timeout=1.0)
+
+        # 🆕 清理 TTS 资源
+        try:
+            if self.tts and hasattr(self.tts, 'cleanup'):
+                logger.debug(f"[BaseReal] Cleaning up TTS for session {self.sessionid}")
+                self.tts.cleanup()
+        except Exception as e:
+            logger.debug(f"[BaseReal] Error cleaning up TTS: {e}")
+
+        # 🆕 清理 ASR 资源
+        try:
+            if hasattr(self, 'asr') and self.asr and hasattr(self.asr, 'stop'):
+                logger.debug(f"[BaseReal] Stopping ASR for session {self.sessionid}")
+                self.asr.stop()
+        except Exception as e:
+            logger.debug(f"[BaseReal] Error stopping ASR: {e}")
+
+        try:
+            if hasattr(self, 'lip_asr') and self.lip_asr and hasattr(self.lip_asr, 'stop'):
+                logger.debug(f"[BaseReal] Stopping LipASR for session {self.sessionid}")
+                self.lip_asr.stop()
+        except Exception as e:
+            logger.debug(f"[BaseReal] Error stopping LipASR: {e}")
 
         logger.info(f"[BaseReal] stop_all_threads completed for session {self.sessionid}")
 

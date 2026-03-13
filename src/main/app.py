@@ -276,18 +276,17 @@ async def offer(request):
                 logger.warning(
                     f"[WEBRTC] Connection {pc.connectionState} for session {sessionid}")
 
-                # Stop the player's tracks to signal frame processing thread
+                # Track stopping will be done by stop_worker_thread() below
+
+                # 🆕 修复：先停止 HumanPlayer 的 worker 线程
                 if sessionid in webrtc_players:
                     player = webrtc_players[sessionid]
                     try:
-                        if player.audio is not None:
-                            player.audio.stop()
-                            logger.debug(f"[WEBRTC] Stopped audio track for session {sessionid}")
-                        if player.video is not None:
-                            player.video.stop()
-                            logger.debug(f"[WEBRTC] Stopped video track for session {sessionid}")
+                        if hasattr(player, 'stop_worker_thread'):
+                            logger.info(f"[WEBRTC] Stopping HumanPlayer worker thread for session {sessionid}")
+                            player.stop_worker_thread()
                     except Exception as e:
-                        logger.error(f"[WEBRTC] Error stopping tracks: {str(e)}")
+                        logger.error(f"[WEBRTC] Error stopping worker thread: {str(e)}")
                     finally:
                         del webrtc_players[sessionid]
 
@@ -320,16 +319,17 @@ async def offer(request):
             if pc.iceConnectionState in ("disconnected", "failed", "closed"):
                 logger.warning(
                     f"[WEBRTC] ICE connection {pc.iceConnectionState} for session {sessionid}")
-                # Stop tracks proactively to prevent thread hanging
+                # 🆕 修复：先停止 HumanPlayer 的 worker 线程
                 if sessionid in webrtc_players:
                     player = webrtc_players[sessionid]
                     try:
-                        if player.audio is not None:
-                            player.audio.stop()
-                        if player.video is not None:
-                            player.video.stop()
+                        if hasattr(player, 'stop_worker_thread'):
+                            logger.info(f"[WEBRTC] ICE: Stopping HumanPlayer worker thread for session {sessionid}")
+                            player.stop_worker_thread()
                     except Exception as e:
-                        logger.error(f"[WEBRTC] Error stopping tracks on ICE state change: {str(e)}")
+                        logger.error(f"[WEBRTC] ICE: Error stopping worker thread: {str(e)}")
+                    finally:
+                        del webrtc_players[sessionid]
 
                 # 🆕 主动停止 nerfreal 的所有线程，防止资源泄漏
                 if sessionid in nerfreals:
@@ -1007,16 +1007,15 @@ async def run(push_url, sessionid):
     async def on_connectionstatechange():
         logger.info("Connection state is %s" % pc.connectionState)
         if pc.connectionState in ("disconnected", "failed", "closed"):
-            # Stop the player's tracks to signal frame processing thread
+            # 🆕 修复：先停止 HumanPlayer 的 worker 线程
             if sessionid in webrtc_players:
                 player = webrtc_players[sessionid]
                 try:
-                    if player.audio is not None:
-                        player.audio.stop()
-                    if player.video is not None:
-                        player.video.stop()
+                    if hasattr(player, 'stop_worker_thread'):
+                        logger.info(f"[WEBRTC] Human: Stopping HumanPlayer worker thread for session {sessionid}")
+                        player.stop_worker_thread()
                 except Exception as e:
-                    logger.error(f"[WEBRTC] Error stopping tracks: {str(e)}")
+                    logger.error(f"[WEBRTC] Human: Error stopping worker thread: {str(e)}")
                 finally:
                     del webrtc_players[sessionid]
 

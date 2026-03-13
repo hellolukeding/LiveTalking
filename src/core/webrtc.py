@@ -145,6 +145,7 @@ class HumanPlayer:
         self.__started: Set[PlayerStreamTrack] = set()
         self.__audio: Optional[PlayerStreamTrack] = None
         self.__video: Optional[PlayerStreamTrack] = None
+        self.__stopping = False  # 🆕 标记是否正在停止
 
         self.__audio = PlayerStreamTrack(self, kind="audio")
         self.__video = PlayerStreamTrack(self, kind="video")
@@ -170,6 +171,8 @@ class HumanPlayer:
         return self.__video
 
     def _start(self, track: PlayerStreamTrack) -> None:
+        if self.__stopping:  # 🆕 如果正在停止，不允许启动
+            return
         self.__started.add(track)
         if self.__thread is None:
             self.__log_debug("Starting worker thread")
@@ -193,11 +196,43 @@ class HumanPlayer:
         if not self.__started and self.__thread is not None:
             self.__log_debug("Stopping worker thread")
             self.__thread_quit.set()
-            self.__thread.join()
+            self.__thread.join(timeout=5.0)  # 🆕 添加超时，避免永久阻塞
+            if self.__thread.is_alive():
+                mylogger.warning(f"HumanPlayer worker thread did not stop in time")
             self.__thread = None
 
         if not self.__started and self.__container is not None:
             self.__container = None
+
+    def stop_worker_thread(self):
+        """🆕 主动停止 worker 线程（用于异常断开时）"""
+        if self.__stopping:
+            return
+        self.__stopping = True
+
+        # 停止所有 tracks
+        if self.__audio:
+            try:
+                self.__audio.stop()
+            except Exception:
+                pass
+        if self.__video:
+            try:
+                self.__video.stop()
+            except Exception:
+                pass
+
+        # 确保线程停止
+        if self.__thread is not None and self.__thread.is_alive():
+            self.__log_debug("Force stopping worker thread")
+            self.__thread_quit.set()
+            self.__thread.join(timeout=5.0)
+            if self.__thread.is_alive():
+                mylogger.warning(f"HumanPlayer worker thread still alive after force stop")
+            self.__thread = None
+
+        # 清理容器引用
+        self.__container = None
 
     def __log_debug(self, msg: str, *args) -> None:
         mylogger.debug(f"HumanPlayer {msg}", *args)

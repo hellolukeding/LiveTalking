@@ -62,7 +62,7 @@ from basereal import BaseReal
 from llm import llm_response
 from logger import logger
 from webrtc import HumanPlayer
-from avatar_manager import (
+from services.avatar_manager import (
     list_avatars, get_avatar, update_avatar, delete_avatar,
     generate_avatar_async
 )
@@ -144,7 +144,6 @@ async def offer(request):
             )
 
         # Validate avatar exists and is ready
-        from services.avatar_manager import get_avatar
         avatar_meta = get_avatar(avatar_id)
         if not avatar_meta:
             logger.error(f"[OFFER] Avatar not found: {avatar_id}")

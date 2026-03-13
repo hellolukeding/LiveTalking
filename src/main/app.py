@@ -104,22 +104,39 @@ def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
     opt_copy.sessionid = sessionid
 
     # 按会话加载 avatar（不再使用全局 avatar）
-    from lipreal import load_avatar
-    session_avatar = load_avatar(avatar_id)
-    logger.info(f"[BUILD] Loaded avatar for session {sessionid}: {avatar_id}")
+    # 从 meta.json 读取 avatar 名字和 voice_id
+    import json
+    meta_path = f"./data/avatars/{avatar_id}/meta.json"
+    avatar_name = avatar_id  # 默认使用 avatar_id
+    voice_id = getattr(opt_copy, 'REF_FILE', 'zh_female_wenroushunshun_mars_bigtts')  # 默认语音
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+            avatar_name = meta.get('name', avatar_id)
+            voice_id = meta.get('voice_id', voice_id)
+    except Exception as e:
+        logger.warning(f"[BUILD] Failed to load meta.json for {avatar_id}: {e}")
+
+    # 设置 voice_id 到 opt.REF_FILE（TTS 使用）
+    opt_copy.REF_FILE = voice_id
+
+    logger.info(f"[BUILD] Loaded avatar for session {sessionid}: {avatar_id}, name: {avatar_name}, voice_id: {voice_id}")
 
     if opt_copy.model == 'wav2lip':
-        from lipreal import LipReal
-        nerfreal = LipReal(opt_copy, model, session_avatar)
+        from lipreal import load_avatar, LipReal
+        frame_list, face_list, coord_list, _ = load_avatar(avatar_id)
+        nerfreal = LipReal(opt_copy, model, (frame_list, face_list, coord_list), avatar_name)
     elif opt_copy.model == 'musetalk':
-        from musereal import MuseReal
-        nerfreal = MuseReal(opt_copy, model, session_avatar)
+        from musereal import load_avatar, MuseReal
+        frame_list, mask_list, coord_list, mask_coords, latents = load_avatar(avatar_id)
+        nerfreal = MuseReal(opt_copy, model, (frame_list, mask_list, coord_list, mask_coords, latents), avatar_name)
     # elif opt_copy.model == 'ernerf':
     #     from nerfreal import NeRFReal
     #     nerfreal = NeRFReal(opt_copy,model,session_avatar)
     elif opt_copy.model == 'ultralight':
-        from lightreal import LightReal
-        nerfreal = LightReal(opt_copy, model, session_avatar)
+        from lightreal import load_avatar, LightReal
+        ultralight_model, frame_list, face_list, coord_list = load_avatar(avatar_id)
+        nerfreal = LightReal(opt_copy, model, (ultralight_model, frame_list, face_list, coord_list), avatar_name)
     return nerfreal
 
 # @app.route('/offer', methods=['POST'])
@@ -655,8 +672,10 @@ async def human(request):
                 # Run LLM response in executor
                 logger.debug(
                     f"[HUMAN] Starting LLM response for session {sessionid}")
+                # 传递 avatar_name 到 llm_response
+                avatar_name = getattr(nerfreal, 'avatar_name', '小助手')
                 asyncio.get_event_loop().run_in_executor(
-                    None, llm_response, text, nerfreal)
+                    None, llm_response, text, nerfreal, avatar_name)
 
                 logger.debug(
                     f"[HUMAN] LLM response queued successfully for session {sessionid}")

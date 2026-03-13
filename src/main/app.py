@@ -97,23 +97,29 @@ def randN(N) -> int:
     return random.randint(min, max - 1)
 
 
-def build_nerfreal(sessionid: int) -> BaseReal:
-    # 🆕 修复：创建副本避免修改全局 opt，防止并发会话冲突
+def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
+    # 创建副本避免修改全局 opt
     import copy
     opt_copy = copy.copy(opt)
     opt_copy.sessionid = sessionid
+
+    # 按会话加载 avatar（不再使用全局 avatar）
+    from lipreal import load_avatar
+    session_avatar = load_avatar(avatar_id)
+    logger.info(f"[BUILD] Loaded avatar for session {sessionid}: {avatar_id}")
+
     if opt_copy.model == 'wav2lip':
         from lipreal import LipReal
-        nerfreal = LipReal(opt_copy, model, avatar)
+        nerfreal = LipReal(opt_copy, model, session_avatar)
     elif opt_copy.model == 'musetalk':
         from musereal import MuseReal
-        nerfreal = MuseReal(opt_copy, model, avatar)
+        nerfreal = MuseReal(opt_copy, model, session_avatar)
     # elif opt_copy.model == 'ernerf':
     #     from nerfreal import NeRFReal
-    #     nerfreal = NeRFReal(opt_copy,model,avatar)
+    #     nerfreal = NeRFReal(opt_copy,model,session_avatar)
     elif opt_copy.model == 'ultralight':
         from lightreal import LightReal
-        nerfreal = LightReal(opt_copy, model, avatar)
+        nerfreal = LightReal(opt_copy, model, session_avatar)
     return nerfreal
 
 # @app.route('/offer', methods=['POST'])
@@ -186,7 +192,7 @@ async def offer(request):
             logger.debug(f"[OFFER] Building nerfreal for session {sessionid}")
 
             # Build nerfreal in executor to avoid blocking
-            nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
+            nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id)
 
             if nerfreal is None:
                 raise RuntimeError("Failed to build nerfreal instance")
@@ -1026,8 +1032,8 @@ async def post(url, data):
         logger.info(f'Error: {e}')
 
 
-async def run(push_url, sessionid):
-    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
+async def run(push_url, sessionid, avatar_id):
+    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id)
     nerfreals[sessionid] = nerfreal
 
     pc = RTCPeerConnection()
@@ -1194,7 +1200,7 @@ if __name__ == '__main__':
         warm_up(opt.batch_size, avatar, 160)
     if opt.transport == 'virtualcam':
         thread_quit = Event()
-        nerfreals[0] = build_nerfreal(0)
+        nerfreals[0] = build_nerfreal(0, opt.avatar_id)
         rendthrd = Thread(target=nerfreals[0].render, args=(thread_quit,))
         rendthrd.start()
 
@@ -1256,7 +1262,7 @@ if __name__ == '__main__':
         #         push_url = opt.push_url
         #         if k != 0:
         #             push_url = opt.push_url+str(k)
-        #         loop.run_until_complete(run(push_url, k))
+        #         loop.run_until_complete(run(push_url, k, opt.avatar_id))
         logger.info(f"[SERVER] Ready to accept up to {opt.max_session} client connections")
         loop.run_forever()
     # Thread(target=run_server, args=(web.AppRunner(appasync),)).start()

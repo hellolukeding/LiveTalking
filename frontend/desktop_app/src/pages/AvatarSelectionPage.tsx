@@ -81,12 +81,12 @@ export default function AvatarSelectionPage() {
               style={{ cursor: 'pointer' }}
             >
               <Card.Meta
-                title={avatar.name}
+                title={avatar.name || 'Unnamed Avatar'}
                 description={
                   <div>
-                    <Tag color="blue">{avatar.tts_type}</Tag>
+                    <Tag color="blue">{avatar.tts_type || 'edge'}</Tag>
                     <div style={{ marginTop: '8px' }}>
-                      <Text type="secondary">ID: {avatar.avatar_id}</Text>
+                      <Text type="secondary">ID: {avatar.avatar_id || 'Unknown'}</Text>
                     </div>
                     {avatar.frame_count && (
                       <div>

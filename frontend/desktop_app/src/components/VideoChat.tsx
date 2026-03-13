@@ -15,6 +15,12 @@ import { negotiateOffer, sendHumanMessage } from '../api';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
 import Settings from './Settings';
 
+// Avatar ID validation function
+const isValidAvatarId = (id: string | null): id is string => {
+    if (!id) return false;
+    return /^[a-zA-Z0-9_-]+$/.test(id);
+};
+
 // ========== 对话状态机 ==========
 // 状态转换流程: IDLE -> LISTENING -> LLM_PROCESSING -> TTS_PLAYING -> LISTENING
 //                          ^______________________________| (循环)
@@ -37,7 +43,7 @@ export default function VideoChat() {
     const avatarId = searchParams.get('avatar_id');
 
     useEffect(() => {
-        if (!avatarId?.trim()) {
+        if (!isValidAvatarId(avatarId)) {
             navigate('/select-avatar', { replace: true });
             return;
         }

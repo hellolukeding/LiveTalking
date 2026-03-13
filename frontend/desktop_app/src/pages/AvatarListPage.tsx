@@ -13,6 +13,7 @@ import { Avatar, Button, Card, Col, Empty, message, Modal, Row, Spin, Tag, Toolt
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AvatarMeta, deleteAvatar, listAvatars } from '../api/avatar';
+import { getApiBaseUrl } from '../api/client';
 
 const { Title, Text } = Typography;
 
@@ -41,7 +42,11 @@ const StatusBadge = ({ status }: { status: AvatarMeta['status'] }) => {
 };
 
 const AvatarCardCover = ({ avatar }: { avatar: AvatarMeta }) => {
-  const imagePath = avatar.image_path && avatar.status === 'ready' ? avatar.image_path : undefined;
+  // 使用后端真实地址拼接图片 URL
+  const apiBaseUrl = getApiBaseUrl();
+  const imagePath = avatar.image_path && avatar.status === 'ready'
+    ? `${apiBaseUrl}${avatar.image_path}`
+    : undefined;
 
   if (imagePath) {
     return (

@@ -5,7 +5,7 @@ from openai import OpenAI
 
 from basereal import BaseReal
 from logger import logger
-from system_prompt import SYSTEM_PROMPT
+from system_prompt import get_system_prompt
 
 
 # Load environment variables at runtime to ensure they're available
@@ -16,7 +16,7 @@ def get_api_config():
     return api_key, base_url, model
 
 
-def llm_response(message, nerfreal: BaseReal):
+def llm_response(message, nerfreal: BaseReal, avatar_name: str = "小li"):
     start = time.perf_counter()
 
     # Get API configuration at runtime
@@ -44,9 +44,12 @@ def llm_response(message, nerfreal: BaseReal):
     logger.info(f"llm model: {model}")
     logger.info(f"llm key: {api_key}")
 
+    # 动态生成系统提示词
+    system_prompt = get_system_prompt(avatar_name)
+
     completion = client.chat.completions.create(
         model=model,
-        messages=[{'role': 'system', 'content': SYSTEM_PROMPT},
+        messages=[{'role': 'system', 'content': system_prompt},
                   {'role': 'user', 'content': message}],
         stream=True,
         # 通过以下设置，在流式输出的最后一行展示token使用信息

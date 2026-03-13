@@ -23,7 +23,6 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { AvatarMeta, getAvatar, updateAvatar } from '../api/avatar';
 import { getApiBaseUrl } from '../api/client';
-import { getApiBaseUrl } from '../api/client';
 
 const { Title, Text } = Typography;
 

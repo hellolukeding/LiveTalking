@@ -12,6 +12,7 @@ import { message } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { negotiateOffer, sendHumanMessage } from '../api';
+import { getApiBaseUrl } from '../api/client';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
 import Settings from './Settings';
 
@@ -461,9 +462,8 @@ export default function VideoChat() {
                     // Debug: 检查 base64 的前几个字符
                     console.log('[ASR] Base64 first 20 chars:', base64Audio?.substring(0, 20));
 
-                    // 发送到后端 - 使用 LiveTalking API 端口 8010
-                    const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
-                        || `${window.location.protocol}//${window.location.hostname}:8010`;
+                    // 发送到后端 - 使用 LiveTalking API 配置
+                    const apiBaseUrl = getApiBaseUrl();
                     const response = await fetch(`${apiBaseUrl}/speech_recognize`, {
                         method: 'POST',
                         headers: {

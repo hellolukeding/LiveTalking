@@ -23,3 +23,6 @@ export const API_CONFIG = {
     port: API_PORT,
     baseUrl: BASE_URL,
 };
+
+// 获取 API 基础 URL
+export const getApiBaseUrl = () => BASE_URL;

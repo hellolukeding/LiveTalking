@@ -1034,6 +1034,60 @@ async def avatar_delete(request):
         )
 
 
+
+
+async def preview_voice_tts(request):
+    """
+    生成音色试听音频
+    Returns: Audio data (audio/mpeg)
+    """
+    try:
+        params = await request.json()
+        voice_id = params.get('voice_id')
+
+        if not voice_id:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "voice_id is required"}),
+                status=400
+            )
+
+        # Validate voice_id format
+        import re
+        if not re.match(r'^[a-zA-Z0-9_\-]+$', voice_id):
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid voice_id format"}),
+                status=400
+            )
+
+        # Call Doubao TTS service to generate preview audio
+        from tts_service import generate_preview_audio
+
+        audio_data = await generate_preview_audio(
+            text="你好，我是数字人。",  # Fixed preview text
+            voice_id=voice_id
+        )
+
+        if not audio_data:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Failed to generate audio"}),
+                status=500
+            )
+
+        return web.Response(
+            body=audio_data,
+            content_type='audio/mpeg'
+        )
+
+    except Exception as e:
+        logger.error(f"[PREVIEW] Voice preview failed: {str(e)}")
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": f"Preview failed: {str(e)}"}),
+            status=500
+        )
 async def on_shutdown(app):
     # 关闭对等连接
     coros = [pc.close() for pc in pcs]
@@ -1052,6 +1106,8 @@ async def post(url, data):
 
 async def run(push_url, sessionid, avatar_id):
     nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id)
+
+
     nerfreals[sessionid] = nerfreal
 
     pc = RTCPeerConnection()
@@ -1240,6 +1296,7 @@ if __name__ == '__main__':
     appasync.router.add_get("/avatars/{avatar_id}", avatar_get)
     appasync.router.add_put("/avatars/{avatar_id}", avatar_update)
     appasync.router.add_delete("/avatars/{avatar_id}", avatar_delete)
+    appasync.router.add_post('/preview_voice', preview_voice_tts)
     # Avatar 静态资源（图片等）
     appasync.router.add_static("/avatars/", path="data/avatars", name="avatar_static")
 

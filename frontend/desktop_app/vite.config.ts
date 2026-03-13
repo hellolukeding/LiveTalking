@@ -40,12 +40,11 @@ export default defineConfig(async () => ({
       '/humanaudio': 'http://localhost:8011',
       '/interrupt_talk': 'http://localhost:8011',
       '/set_audiotype': 'http://localhost:8011',
-      // Avatar API and static files (images)
-      '^/avatars/.*': {
+      // Avatar API - use function matcher for all /avatars paths
+      '/avatars': {
         target: 'http://localhost:8011',
         changeOrigin: true,
       },
-      '/avatars': 'http://localhost:8011',
     },
   },
 }));

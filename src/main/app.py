@@ -149,6 +149,24 @@ async def offer(request):
                 status=400
             )
 
+        # Validate avatar_id format (only alphanumeric, underscore, hyphen)
+        if not re.match(r'^[a-zA-Z0-9_-]+$', avatar_id):
+            logger.error(f"[OFFER] Invalid avatar_id format: {avatar_id}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid avatar_id format"}),
+                status=400
+            )
+
+        # Enforce maximum length (64 characters)
+        if len(avatar_id) > 64:
+            logger.error(f"[OFFER] avatar_id too long: {len(avatar_id)}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "avatar_id exceeds maximum length"}),
+                status=400
+            )
+
         # Validate avatar exists and is ready
         avatar_meta = get_avatar(avatar_id)
         if not avatar_meta:

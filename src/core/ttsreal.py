@@ -619,7 +619,7 @@ class DoubaoTTS(BaseTTS):
         self.appid = os.getenv("DOUBAO_APPID")
         self.access_key = os.getenv("DOUBAO_ACCESS_TOKEN") or os.getenv(
             "DOUBAO_AccessKeyID") or os.getenv("DOUBAO_TOKEN")
-        self.voice_id = os.getenv("DOUBAO_VOICE_ID") or opt.REF_FILE
+        self.voice_id = opt.REF_FILE or os.getenv("DOUBAO_VOICE_ID")
         self.resource_id = os.getenv("DOUBAO_RESOURCE_ID")
         self.cluster = "volcano_tts"
 

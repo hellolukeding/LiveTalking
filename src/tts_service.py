@@ -6,6 +6,7 @@ import os
 import gzip
 import uuid
 import asyncio
+import time
 from logger import logger
 
 try:
@@ -125,16 +126,17 @@ def _sync_generate_audio(text: str, voice_id: str) -> bytes:
         audio_chunks = []
         total_samples = 0
         max_samples = 24000 * 10  # Max 10 seconds of audio
-        chunk_timeout = 5.0  # 5 seconds without new data = end
-        last_data_time = time_time()
+        start_time = time.time()
+        max_duration = 10.0  # Max 10 seconds for entire operation
 
-        while total_samples < max_samples:
+        while total_samples < max_samples and (time.time() - start_time) < max_duration:
             try:
-                result = ws.recv(timeout=chunk_timeout)
+                # Use settimeout to control blocking time
+                ws.settimeout(2.0)  # 2 second timeout for each recv
+                result = ws.recv()
                 if len(result) == 0:
                     break
 
-                last_data_time = time_time()
                 header_size = (result[0] & 0x0F) * 4
                 message_type = (result[1] & 0xF0) >> 4
                 payload = result[header_size:]
@@ -161,9 +163,12 @@ def _sync_generate_audio(text: str, voice_id: str) -> bytes:
                     break
 
             except websocket.WebSocketTimeoutException:
-                # No data for chunk_timeout seconds
-                logger.info("[TTS] WebSocket timeout, assuming stream complete")
-                break
+                # No data for 2 seconds, check if we should continue
+                if len(audio_chunks) > 0:
+                    logger.info("[TTS] No new data for 2s, stream complete")
+                    break
+                # Otherwise continue waiting
+                continue
 
         if ws:
             ws.close()
@@ -189,12 +194,6 @@ def _sync_generate_audio(text: str, voice_id: str) -> bytes:
                 ws.close()
             except:
                 pass
-
-
-def time_time():
-    """Get current time"""
-    import time
-    return time.time()
 
 
 async def generate_speech_async(text: str, voice_id: str = "zh_female_wenroushunshun_mars_bigtts") -> bytes:

@@ -3,6 +3,7 @@ import client from './client';
 export interface OfferPayload {
     sdp: string | undefined;
     type: string | undefined;
+    avatar_id: string;
 }
 
 export interface OfferResponse {

@@ -10,10 +10,16 @@ import {
 } from '@ant-design/icons';
 import { message } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { negotiateOffer, sendHumanMessage } from '../api';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
 import Settings from './Settings';
+
+// Avatar ID validation function
+const isValidAvatarId = (id: string | null): id is string => {
+    if (!id) return false;
+    return /^[a-zA-Z0-9_-]+$/.test(id);
+};
 
 // ========== 对话状态机 ==========
 // 状态转换流程: IDLE -> LISTENING -> LLM_PROCESSING -> TTS_PLAYING -> LISTENING
@@ -33,6 +39,16 @@ interface ASRBuffer {
 
 export default function VideoChat() {
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
+    const avatarId = searchParams.get('avatar_id');
+
+    useEffect(() => {
+        if (!isValidAvatarId(avatarId)) {
+            navigate('/select-avatar', { replace: true });
+            return;
+        }
+    }, [avatarId, navigate]);
+
     const [sessionId, setSessionId] = useState<string>('0');
     const [isStarted, setIsStarted] = useState(false);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -642,6 +658,7 @@ export default function VideoChat() {
             const answer = await negotiateOffer({
                 sdp: pc.localDescription?.sdp,
                 type: pc.localDescription?.type,
+                avatar_id: avatarId || '',
             });
 
             setSessionId(answer.sessionid);

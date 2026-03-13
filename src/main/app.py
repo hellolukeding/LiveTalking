@@ -62,7 +62,7 @@ from basereal import BaseReal
 from llm import llm_response
 from logger import logger
 from webrtc import HumanPlayer
-from avatar_manager import (
+from services.avatar_manager import (
     list_avatars, get_avatar, update_avatar, delete_avatar,
     generate_avatar_async
 )
@@ -97,23 +97,29 @@ def randN(N) -> int:
     return random.randint(min, max - 1)
 
 
-def build_nerfreal(sessionid: int) -> BaseReal:
-    # 🆕 修复：创建副本避免修改全局 opt，防止并发会话冲突
+def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
+    # 创建副本避免修改全局 opt
     import copy
     opt_copy = copy.copy(opt)
     opt_copy.sessionid = sessionid
+
+    # 按会话加载 avatar（不再使用全局 avatar）
+    from lipreal import load_avatar
+    session_avatar = load_avatar(avatar_id)
+    logger.info(f"[BUILD] Loaded avatar for session {sessionid}: {avatar_id}")
+
     if opt_copy.model == 'wav2lip':
         from lipreal import LipReal
-        nerfreal = LipReal(opt_copy, model, avatar)
+        nerfreal = LipReal(opt_copy, model, session_avatar)
     elif opt_copy.model == 'musetalk':
         from musereal import MuseReal
-        nerfreal = MuseReal(opt_copy, model, avatar)
+        nerfreal = MuseReal(opt_copy, model, session_avatar)
     # elif opt_copy.model == 'ernerf':
     #     from nerfreal import NeRFReal
-    #     nerfreal = NeRFReal(opt_copy,model,avatar)
+    #     nerfreal = NeRFReal(opt_copy,model,session_avatar)
     elif opt_copy.model == 'ultralight':
         from lightreal import LightReal
-        nerfreal = LightReal(opt_copy, model, avatar)
+        nerfreal = LightReal(opt_copy, model, session_avatar)
     return nerfreal
 
 # @app.route('/offer', methods=['POST'])
@@ -132,6 +138,54 @@ async def offer(request):
                     {"code": -1, "msg": "Invalid request: missing sdp or type"}),
                 status=400
             )
+
+        # Validate avatar_id parameter
+        avatar_id = params.get('avatar_id')
+        if not avatar_id:
+            logger.error("[OFFER] avatar_id is required")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "avatar_id is required"}),
+                status=400
+            )
+
+        # Validate avatar_id format (only alphanumeric, underscore, hyphen)
+        if not re.match(r'^[a-zA-Z0-9_-]+$', avatar_id):
+            logger.error(f"[OFFER] Invalid avatar_id format: {avatar_id}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid avatar_id format"}),
+                status=400
+            )
+
+        # Enforce maximum length (64 characters)
+        if len(avatar_id) > 64:
+            logger.error(f"[OFFER] avatar_id too long: {len(avatar_id)}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "avatar_id exceeds maximum length"}),
+                status=400
+            )
+
+        # Validate avatar exists and is ready
+        avatar_meta = get_avatar(avatar_id)
+        if not avatar_meta:
+            logger.error(f"[OFFER] Avatar not found: {avatar_id}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": f"Avatar not found: {avatar_id}"}),
+                status=400
+            )
+
+        if avatar_meta.get('status') != 'ready':
+            logger.error(f"[OFFER] Avatar not ready: {avatar_id}, status={avatar_meta.get('status')}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": f"Avatar not ready: {avatar_id}"}),
+                status=400
+            )
+
+        logger.info(f"[OFFER] Using avatar: {avatar_id}")
 
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
         logger.debug(
@@ -156,7 +210,7 @@ async def offer(request):
             logger.debug(f"[OFFER] Building nerfreal for session {sessionid}")
 
             # Build nerfreal in executor to avoid blocking
-            nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
+            nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id)
 
             if nerfreal is None:
                 raise RuntimeError("Failed to build nerfreal instance")
@@ -996,8 +1050,8 @@ async def post(url, data):
         logger.info(f'Error: {e}')
 
 
-async def run(push_url, sessionid):
-    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid)
+async def run(push_url, sessionid, avatar_id):
+    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id)
     nerfreals[sessionid] = nerfreal
 
     pc = RTCPeerConnection()
@@ -1149,7 +1203,11 @@ if __name__ == '__main__':
     elif opt.model == 'wav2lip':
         from lipreal import LipReal, load_avatar, load_model, warm_up
         logger.info(opt)
-        model = load_model("./models/wav2lip384.pth")
+        model_path = "./models/wav2lip384.pth"
+        if not os.path.exists(model_path):
+            logger.error(f"模型文件不存在: {model_path}")
+            sys.exit(1)
+        model = load_model(model_path)
         avatar = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size, model, 384)
     elif opt.model == 'ultralight':
@@ -1160,7 +1218,7 @@ if __name__ == '__main__':
         warm_up(opt.batch_size, avatar, 160)
     if opt.transport == 'virtualcam':
         thread_quit = Event()
-        nerfreals[0] = build_nerfreal(0)
+        nerfreals[0] = build_nerfreal(0, opt.avatar_id)
         rendthrd = Thread(target=nerfreals[0].render, args=(thread_quit,))
         rendthrd.start()
 
@@ -1222,7 +1280,7 @@ if __name__ == '__main__':
         #         push_url = opt.push_url
         #         if k != 0:
         #             push_url = opt.push_url+str(k)
-        #         loop.run_until_complete(run(push_url, k))
+        #         loop.run_until_complete(run(push_url, k, opt.avatar_id))
         logger.info(f"[SERVER] Ready to accept up to {opt.max_session} client connections")
         loop.run_forever()
     # Thread(target=run_server, args=(web.AppRunner(appasync),)).start()

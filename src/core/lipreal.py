@@ -23,6 +23,7 @@ import math
 import os
 import pickle
 import queue
+import re
 import time
 from queue import Queue
 from threading import Event, Thread
@@ -50,10 +51,11 @@ print('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
     if device == 'cuda':
-        checkpoint = torch.load(checkpoint_path)  # ,weights_only=True
+        checkpoint = torch.load(checkpoint_path, weights_only=True)
     else:
         checkpoint = torch.load(checkpoint_path,
-                                map_location=lambda storage, loc: storage)
+                                map_location=lambda storage, loc: storage,
+                                weights_only=True)
     return checkpoint
 
 
@@ -72,21 +74,33 @@ def load_model(path):
 
 
 def load_avatar(avatar_id):
-    avatar_path = f"./data/avatars/{avatar_id}"
-    full_imgs_path = f"{avatar_path}/full_imgs"
-    face_imgs_path = f"{avatar_path}/face_imgs"
-    coords_path = f"{avatar_path}/coords.pkl"
+    # Validate avatar_id format (only alphanumeric, underscore, hyphen)
+    if not re.match(r'^[a-zA-Z0-9_-]+$', avatar_id):
+        raise ValueError(f"Invalid avatar_id format: {avatar_id}")
+
+    # Use pathlib for safe path operations
+    from pathlib import Path
+    avatars_root = Path("./data/avatars").resolve()
+    avatar_path = (avatars_root / avatar_id).resolve()
+
+    # Ensure the resolved path is within avatars_root (prevent path traversal)
+    if not str(avatar_path).startswith(str(avatars_root)):
+        raise ValueError(f"Path traversal attempt detected: {avatar_id}")
+
+    full_imgs_path = avatar_path / "full_imgs"
+    face_imgs_path = avatar_path / "face_imgs"
+    coords_path = avatar_path / "coords.pkl"
 
     with open(coords_path, 'rb') as f:
         coord_list_cycle = pickle.load(f)
     input_img_list = glob.glob(os.path.join(
-        full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
+        str(full_imgs_path), '*.[jpJP][pnPN]*[gG]'))
     input_img_list = sorted(input_img_list, key=lambda x: int(
         os.path.splitext(os.path.basename(x))[0]))
     frame_list_cycle = read_imgs(input_img_list)
     # self.imagecache = ImgCache(len(self.coord_list_cycle),self.full_imgs_path,1000)
     input_face_list = glob.glob(os.path.join(
-        face_imgs_path, '*.[jpJP][pnPN]*[gG]'))
+        str(face_imgs_path), '*.[jpJP][pnPN]*[gG]'))
     input_face_list = sorted(input_face_list, key=lambda x: int(
         os.path.splitext(os.path.basename(x))[0]))
     face_list_cycle = read_imgs(input_face_list)
@@ -183,6 +197,10 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                 face = face_list_cycle[idx]
                 img_batch.append(face)
             img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
+
+            # 验证 face 形状是否有效
+            if face.size == 0 or len(face.shape) < 2:
+                raise ValueError(f"Invalid face shape: {face.shape}")
 
             img_masked = img_batch.copy()
             img_masked[:, face.shape[0]//2:] = 0

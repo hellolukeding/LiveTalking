@@ -37,8 +37,9 @@ export default function VideoChat() {
     const avatarId = searchParams.get('avatar_id');
 
     useEffect(() => {
-        if (!avatarId) {
+        if (!avatarId?.trim()) {
             navigate('/select-avatar', { replace: true });
+            return;
         }
     }, [avatarId, navigate]);
 

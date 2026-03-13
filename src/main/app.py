@@ -1212,12 +1212,12 @@ if __name__ == '__main__':
     parser.add_argument('-m', type=int, default=8)
     parser.add_argument('-r', type=int, default=10)
 
-    parser.add_argument('--W', type=int, default=450, help="GUI width")
-    parser.add_argument('--H', type=int, default=450, help="GUI height")
+    parser.add_argument('--W', type=int, default=768, help="GUI width")
+    parser.add_argument('--H', type=int, default=768, help="GUI height")
     
     # WebRTC video bitrate control
-    parser.add_argument('--video_bitrate', type=int, default=3000,
-                        help="Video bitrate in kbps (default: 3000, recommended: 2000-5000)")
+    parser.add_argument('--video_bitrate', type=int, default=8000,
+                        help="Video bitrate in kbps (default: 8000, recommended: 5000-10000)")
     parser.add_argument('--video_codec', type=str, default='auto',
                         choices=['auto', 'H264', 'VP8', 'VP9'],
                         help="Video codec preference (default: auto)")

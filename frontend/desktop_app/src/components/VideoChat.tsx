@@ -10,7 +10,7 @@ import {
 } from '@ant-design/icons';
 import { message } from 'antd';
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { negotiateOffer, sendHumanMessage } from '../api';
 import ChatSidebar, { ChatMessage } from './ChatSidebar';
 import Settings from './Settings';
@@ -33,6 +33,15 @@ interface ASRBuffer {
 
 export default function VideoChat() {
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
+    const avatarId = searchParams.get('avatar_id');
+
+    useEffect(() => {
+        if (!avatarId) {
+            navigate('/select-avatar', { replace: true });
+        }
+    }, [avatarId, navigate]);
+
     const [sessionId, setSessionId] = useState<string>('0');
     const [isStarted, setIsStarted] = useState(false);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -642,6 +651,7 @@ export default function VideoChat() {
             const answer = await negotiateOffer({
                 sdp: pc.localDescription?.sdp,
                 type: pc.localDescription?.type,
+                avatar_id: avatarId || '',
             });
 
             setSessionId(answer.sessionid);

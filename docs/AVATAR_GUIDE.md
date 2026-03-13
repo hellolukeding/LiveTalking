@@ -45,8 +45,8 @@ GET /avatars
     {
       "avatar_id": "wav2lip256_avatar1",
       "name": "Wav2Lip256 Avatar1",
-      "tts_type": "edge",
-      "voice_id": "zh-CN-XiaoxiaoNeural",
+      "tts_type": "doubao",
+      "voice_id": "zh_female_wenroushunshun_mars_bigtts",
       "status": "ready",
       "frame_count": 537,
       "image_path": "/avatars/wav2lip256_avatar1/face_imgs/00000000.png",
@@ -87,7 +87,7 @@ Content-Type: multipart/form-data
 - `avatar_id`: Unique identifier (optional, auto-generated if not provided)
 - `name`: Display name
 - `video`: Video file (mp4, mov, avi, webm)
-- `tts_type`: TTS engine type (edge, doubao, cosyvoice, etc.)
+- `tts_type`: TTS engine type (fixed to doubao)
 - `voice_id`: Voice identifier for TTS
 
 **Response:**
@@ -112,8 +112,8 @@ Content-Type: application/json
 ```json
 {
   "name": "Updated Name",
-  "tts_type": "edge",
-  "voice_id": "zh-CN-XiaoxiaoNeural"
+  "tts_type": "doubao",
+  "voice_id": "zh_female_wenroushunshun_mars_bigtts"
 }
 ```
 
@@ -138,6 +138,36 @@ DELETE /avatars/{avatar_id}
 | `image_path` | string \| null | Preview image URL |
 | `created_at` | string | ISO 8601 timestamp |
 | `updated_at` | string | ISO 8601 timestamp (optional) |
+
+## TTS Configuration
+
+LiveTalking uses **Doubao TTS** (豆包语音合成) as the default and only TTS engine.
+
+### Supported Voice Types
+
+The system supports 200+ voice types from Doubao TTS. Common voices include:
+
+| Voice Name | Voice Type ID |
+|------------|---------------|
+| 温柔淑女 (推荐) | zh_female_wenroushunshun_mars_bigtts |
+| 阳光青年 | zh_male_yangguangqingnian_mars_bigtts |
+| 甜美桃子 | zh_female_tianmeitaozi_mars_bigtts |
+| 爽快思思 | zh_female_shuangkuaisisi_moon_bigtts |
+| 知性女声 | zh_female_zhixingnvsheng_mars_bigtts |
+| 清爽男大 | zh_male_qingshuangnanda_mars_bigtts |
+| 京腔侃爷 | zh_male_jingqiangkanye_moon_bigtts |
+| 湾湾小何 | zh_female_wanwanxiaohe_moon_bigtts |
+| 广州德哥 | zh_male_guozhoudege_moon_bigtts |
+| 呆萌川妹 | zh_female_daimengchuanmei_moon_bigtts |
+
+For the complete voice list, see: [豆包语音音色列表](https://www.volcengine.com/docs/6561/1257544)
+
+### Voice Selection
+
+When creating an avatar:
+1. Select a voice from the dropdown (10 common options)
+2. Click "试听" button to preview the voice
+3. Or enter a custom Voice Type ID
 
 ## Avatar Storage
 
@@ -202,9 +232,9 @@ python wav2lip/genavatar384.py \
   --img_size 384
 ```
 
-### Using genavatar.py
+### Using genavatar.py (Legacy)
 
-For 96x96 resolution avatars:
+For 96x96 resolution avatars (legacy support):
 
 ```bash
 python wav2lip/genavatar.py \
@@ -212,13 +242,21 @@ python wav2lip/genavatar.py \
   --avatar_id my_new_avatar
 ```
 
+**Note**: This script generates 96x96 resolution avatars. For new avatars, use genavatar384.py instead.
+
 ### Output
 
 The generated avatar will be saved to `data/avatars/{avatar_id}/` with:
-- Face images at the specified resolution
+- Face images at 384x384 resolution
 - Face coordinates for animation
 - Metadata file
 
+
+## Avatar Resolution
+
+All avatars are generated at **384x384** resolution using Wav2Lip384 model for higher quality output.
+
+Legacy avatars (256x256 or 96x96) are still supported but new avatars default to 384x384.
 ## Troubleshooting
 
 ### Avatar Not Showing in Selection Page

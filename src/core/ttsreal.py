@@ -139,8 +139,6 @@ class EdgeTTS(BaseTTS):
                 eventpoint = {'status': 'end', 'text': text}
                 eventpoint.update(**textevent)
             self.parent.put_audio_frame(stream[idx:idx+self.chunk], eventpoint)
-            # 按实时节奏发送
-            time.sleep(self.chunk / self.sample_rate)
             idx += self.chunk
 
         self.input_stream.seek(0)
@@ -262,11 +260,6 @@ class FishTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
-                    # pace production to real-time
-                    try:
-                        time.sleep(self.chunk / self.sample_rate)
-                    except Exception:
-                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}
@@ -376,11 +369,6 @@ class SovitsTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
-                    # pace production to real-time
-                    try:
-                        time.sleep(self.chunk / self.sample_rate)
-                    except Exception:
-                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}
@@ -458,11 +446,6 @@ class CosyVoiceTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
-                    # pace production to real-time
-                    try:
-                        time.sleep(self.chunk / self.sample_rate)
-                    except Exception:
-                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}
@@ -595,11 +578,6 @@ class TencentTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
-                    # pace production to real-time
-                    try:
-                        time.sleep(self.chunk / self.sample_rate)
-                    except Exception:
-                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
                 last_stream = stream[idx:]  # get the remain stream
@@ -716,12 +694,8 @@ class DoubaoTTS(BaseTTS):
                                 first_chunk = False
                                 start_time = time.perf_counter()
 
-                            # 🆕 节流：控制发送速率为实时 (20ms/chunk)
                             self.parent.put_audio_frame(chunk, eventpoint)
                             total_sent += 1
-                            # 精确节流: 320 samples / 16000 Hz = 20ms
-                            chunk_duration = self.chunk / self.sample_rate
-                            time.sleep(chunk_duration)
 
                 self.connection_pool.return_connection(conn)
 
@@ -1472,11 +1446,6 @@ class XTTS(BaseTTS):
                         first = False
                     self.parent.put_audio_frame(
                         stream[idx:idx+self.chunk], eventpoint)
-                    # pace production to real-time
-                    try:
-                        time.sleep(self.chunk / self.sample_rate)
-                    except Exception:
-                        pass
                     streamlen -= self.chunk
                     idx += self.chunk
         eventpoint = {'status': 'end', 'text': text}

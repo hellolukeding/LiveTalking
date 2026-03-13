@@ -104,6 +104,7 @@ class BaseReal:
 
         # Runtime metrics
         self._video_drop_count = 0
+        self._dropped_audio_frames = 0  # 丢帧统计
 
         # Pending audio frames queued when audio_track or its event loop is not ready
         # Use a thread-safe list to buffer frames and flush later when possible
@@ -395,11 +396,17 @@ class BaseReal:
                 self._enqueue_audio_out(new_frame, datainfo)
             else:
                 if hasattr(self, 'loop') and self.loop and self.loop.is_running():
+                    # 🆕 修复：使用阻塞式 put，让 TTS 自动减速匹配播放速度
+                    # 不再丢弃帧，而是等待队列有空间
                     try:
-                        self.loop.call_soon_threadsafe(
-                            self.audio_track._queue.put_nowait, (new_frame, datainfo))
-                    except Exception:
-                        pass  # 队列满时丢弃
+                        asyncio.run_coroutine_threadsafe(
+                            self.audio_track._queue.put((new_frame, datainfo)),
+                            self.loop
+                        ).result(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[AUDIO] 音频队列满，等待超时 5 秒")
+                    except Exception as e:
+                        logger.debug(f"[AUDIO] 帧放入异常: {e}")
                 else:
                     with self._pending_audio_lock:
                         self._pending_audio.append((new_frame, datainfo))
@@ -706,33 +713,15 @@ class BaseReal:
 
         frame_count = 0
         last_log_time = time.time()
-        last_frame_time = time.time()  # 记录最后一次收到帧的时间
-
-        # 🆕 超时配置：防止异常断开后线程无限等待
-        idle_timeout = 30  # 30秒无新帧则退出
-        max_run_time = 3600  # 最大运行1小时后强制退出
-        start_time = time.time()
 
         while not quit_event.is_set():
-            # 🆕 检查是否超时
-            current_time = time.time()
-            if current_time - last_frame_time > idle_timeout:
-                logger.warning(
-                    f"[PROCESS_FRAMES] Session {self.sessionid} idle timeout ({current_time - last_frame_time:.1f}s > {idle_timeout}s), stopping...")
-                break
-
-            if current_time - start_time > max_run_time:
-                logger.warning(
-                    f"[PROCESS_FRAMES] Session {self.sessionid} max run time exceeded ({max_run_time}s), forcing exit...")
-                break
-
             try:
                 res_frame, idx, audio_frames = self.res_frame_queue.get(
                     block=True, timeout=1)
                 frame_count += 1
-                last_frame_time = current_time  # 更新最后帧时间
 
                 # Log frame processing status every 2 seconds
+                current_time = time.time()
                 if current_time - last_log_time > 2:
                     logger.debug(
                         f"[PROCESS_FRAMES] Processing frames: count={frame_count}, session={self.sessionid}")
@@ -742,13 +731,6 @@ class BaseReal:
                     frame_count = 0
 
             except queue.Empty:
-                logger.debug(
-                    f"[PROCESS_FRAMES] Queue empty, waiting for frames... (idle: {current_time - last_frame_time:.1f}s/{idle_timeout}s)")
-                # 🆕 空闲时间过长时退出
-                if current_time - last_frame_time > idle_timeout:
-                    logger.warning(
-                        f"[PROCESS_FRAMES] Idle timeout reached, stopping process_frames for session {self.sessionid}")
-                    break
                 continue
             except Exception as e:
                 logger.debug(

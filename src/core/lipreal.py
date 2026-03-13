@@ -183,27 +183,9 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
 
         if is_all_silence:
             for i in range(batch_size):
-                item = (None, __mirror_index(length, index),
-                        audio_frames[i*2:i*2+2])
-                try:
-                    res_frame_queue.put_nowait(item)
-                except queue.Full:
-                    # 队列已满：尝试丢弃最旧一帧再插入，避免推理线程阻塞
-                    try:
-                        _ = res_frame_queue.get_nowait()
-                    except Exception:
-                        pass
-                    try:
-                        res_frame_queue.put_nowait(item)
-                    except queue.Full:
-                        if owner is not None:
-                            owner.res_drop_count += 1
-                        logger.warning(
-                            f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner, 'res_drop_count', 0)}")
+                res_frame_queue.put((None, __mirror_index(length, index),
+                        audio_frames[i*2:i*2+2]))
                 index = index + 1
-            batch_time = time.perf_counter() - starttime
-            logger.debug(
-                f"[LIPREAL] produced {batch_size} silence frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
         else:
             # print('infer=======')
             t = time.perf_counter()
@@ -243,27 +225,9 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                 count = 0
                 counttime = 0
             for i, res_frame in enumerate(pred):
-                item = (res_frame, __mirror_index(
-                    length, index), audio_frames[i*2:i*2+2])
-                try:
-                    res_frame_queue.put_nowait(item)
-                except queue.Full:
-                    # 丢弃最旧帧并尝试再次插入
-                    try:
-                        _ = res_frame_queue.get_nowait()
-                    except Exception:
-                        pass
-                    try:
-                        res_frame_queue.put_nowait(item)
-                    except queue.Full:
-                        if owner is not None:
-                            owner.res_drop_count += 1
-                        logger.warning(
-                            f"[LIPREAL] res_frame_queue full, drop_count={getattr(owner, 'res_drop_count', 0)}")
+                res_frame_queue.put((res_frame, __mirror_index(
+                    length, index), audio_frames[i*2:i*2+2]))
                 index = index + 1
-            batch_time = time.perf_counter() - starttime
-            logger.debug(
-                f"[LIPREAL] produced {len(pred)} frames in {batch_time:.4f}s, res_qsize={res_frame_queue.qsize()}")
             # print('total batch time:',time.perf_counter()-starttime)
     logger.debug('lipreal inference processor stop')
 
@@ -280,10 +244,7 @@ class LipReal(BaseReal):
 
         self.batch_size = opt.batch_size
         self.idx = 0
-        # Increase buffer to reduce blocking from occasional inference spikes
-        # 扩容以减少短时峰值导致的阻塞；在队列满时丢弃最旧帧以保持推理线程不中断
-        self.res_frame_queue = Queue(self.batch_size*8)  # mp.Queue
-        self.res_drop_count = 0
+        self.res_frame_queue = Queue(self.batch_size*2)  # mp.Queue
         # 周期性指标上报线程（每10s输出一次可观测指标）
         self._metrics_running = True
         self._metrics_thread = Thread(target=self._metrics_logger, daemon=True)

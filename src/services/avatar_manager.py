@@ -7,7 +7,9 @@ Avatar Manager Service
 
 import asyncio
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,29 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def validate_avatar_id(avatar_id: str) -> bool:
+    """
+    Validate avatar_id format to prevent path traversal attacks.
+
+    Args:
+        avatar_id: The avatar ID to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not avatar_id or not isinstance(avatar_id, str):
+        return False
+    # Only allow alphanumeric, underscore, and hyphen
+    # This matches the validation done in lipreal.py
+    if not re.match(r'^[a-zA-Z0-9_-]+$', avatar_id):
+        return False
+    if len(avatar_id) > 64:  # Reasonable max length
+        return False
+    return True
 
 
 # 数据目录（相对于项目根目录）
@@ -26,6 +51,8 @@ def get_avatars_root() -> Path:
 
 
 def get_avatar_path(avatar_id: str) -> Path:
+    if not validate_avatar_id(avatar_id):
+        raise ValueError(f"Invalid avatar_id format: {avatar_id}")
     return get_avatars_root() / avatar_id
 
 
@@ -136,6 +163,9 @@ def list_avatars() -> list[dict]:
 
 def get_avatar(avatar_id: str) -> Optional[dict]:
     """返回单个形象元数据，不存在则返回 None。"""
+    if not validate_avatar_id(avatar_id):
+        logger.warning(f"[AVATAR] Invalid avatar_id format: {avatar_id}")
+        return None
     avatar_path = get_avatar_path(avatar_id)
     if not avatar_path.exists():
         return None
@@ -168,6 +198,9 @@ def update_avatar(avatar_id: str, updates: dict) -> Optional[dict]:
 
 def delete_avatar(avatar_id: str) -> bool:
     """删除形象目录，成功返回 True，不存在返回 False。"""
+    if not validate_avatar_id(avatar_id):
+        logger.warning(f"[AVATAR] Invalid avatar_id format: {avatar_id}")
+        return False
     avatar_path = get_avatar_path(avatar_id)
     if not avatar_path.exists():
         return False
@@ -182,6 +215,8 @@ def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
     同步调用 wav2lip/genavatar384.py 生成数字人形象。
     此函数在后台线程中执行，会修改 meta.json 中的 status 字段。
     """
+    if not validate_avatar_id(avatar_id):
+        raise ValueError(f"Invalid avatar_id format: {avatar_id}")
     avatar_path = get_avatar_path(avatar_id)
     avatar_path.mkdir(parents=True, exist_ok=True)
 

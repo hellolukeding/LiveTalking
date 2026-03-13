@@ -24,7 +24,7 @@ class nonorm_Conv2d(nn.Module):
         self.conv_block = nn.Sequential(
                             nn.Conv2d(cin, cout, kernel_size, stride, padding),
                             )
-        self.act = nn.LeakyReLU(negative_slope=0.01)
+        self.act = nn.LeakyReLU(0.01, inplace=True)
 
     def forward(self, x):
         out = self.conv_block(x)

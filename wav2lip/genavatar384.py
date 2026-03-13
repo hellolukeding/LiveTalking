@@ -18,6 +18,8 @@ parser.add_argument('--video_path', default='', type=str,
                     help='Path to source video')
 parser.add_argument('--nosmooth', default=False, action='store_true',
                     help='Prevent smoothing face detections over a short temporal window')
+parser.add_argument('--no_watermark', default=False, action='store_true',
+                    help='Disable LiveTalking watermark on frames')
 parser.add_argument('--pads', nargs='+', type=int, default=[0, 10, 0, 0],
                     help='Padding (top, bottom, left, right). Please adjust to include chin at least')
 parser.add_argument('--face_det_batch_size', type=int,
@@ -31,7 +33,7 @@ def osmakedirs(path_list):
     for path in path_list:
         os.makedirs(path) if not os.path.exists(path) else None
 
-def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000):
+def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000, no_watermark=False):
     cap = cv2.VideoCapture(vid_path)
     count = 0
     while True:
@@ -39,7 +41,8 @@ def video2imgs(vid_path, save_path, ext = '.png',cut_frame = 10000000):
             break
         ret, frame = cap.read()
         if ret:
-            cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
+            if not no_watermark:
+                cv2.putText(frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
             cv2.imwrite(f"{save_path}/{count:08d}.png", frame)
             count += 1
         else:
@@ -118,7 +121,7 @@ if __name__ == "__main__":
         print("Error: --video_path is required")
         sys.exit(1)
 
-    video2imgs(args.video_path, full_imgs_path, ext='png')
+    video2imgs(args.video_path, full_imgs_path, ext='png', no_watermark=args.no_watermark)
     input_img_list = sorted(glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]')))
 
     frames = read_imgs(input_img_list)

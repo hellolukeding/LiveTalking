@@ -50,10 +50,11 @@ print('Using {} for inference.'.format(device))
 
 def _load(checkpoint_path):
     if device == 'cuda':
-        checkpoint = torch.load(checkpoint_path)  # ,weights_only=True
+        checkpoint = torch.load(checkpoint_path, weights_only=True)
     else:
         checkpoint = torch.load(checkpoint_path,
-                                map_location=lambda storage, loc: storage)
+                                map_location=lambda storage, loc: storage,
+                                weights_only=True)
     return checkpoint
 
 
@@ -183,6 +184,10 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
                 face = face_list_cycle[idx]
                 img_batch.append(face)
             img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
+
+            # 验证 face 形状是否有效
+            if face.size == 0 or len(face.shape) < 2:
+                raise ValueError(f"Invalid face shape: {face.shape}")
 
             img_masked = img_batch.copy()
             img_masked[:, face.shape[0]//2:] = 0

@@ -1149,7 +1149,11 @@ if __name__ == '__main__':
     elif opt.model == 'wav2lip':
         from lipreal import LipReal, load_avatar, load_model, warm_up
         logger.info(opt)
-        model = load_model("./models/wav2lip384.pth")
+        model_path = "./models/wav2lip384.pth"
+        if not os.path.exists(model_path):
+            logger.error(f"模型文件不存在: {model_path}")
+            sys.exit(1)
+        model = load_model(model_path)
         avatar = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size, model, 384)
     elif opt.model == 'ultralight':

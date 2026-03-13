@@ -3,8 +3,10 @@ import {
   CloudUploadOutlined,
   InboxOutlined,
   VideoCameraOutlined,
+  InfoCircleOutlined,
+  SoundOutlined,
 } from '@ant-design/icons';
-import { Alert, Button, Form, Input, Progress, Select, Steps, Typography, Upload, message as antMessage } from 'antd';
+import { Alert, Button, Form, Input, Progress, Select, Space, Steps, Tooltip, Typography, Upload, message as antMessage } from 'antd';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createAvatar } from '../api/avatar';
@@ -12,19 +14,23 @@ import { createAvatar } from '../api/avatar';
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
 
-const TTS_OPTIONS = [
-  { label: 'Edge TTS (免费)', value: 'edge' },
-  { label: 'Doubao TTS', value: 'doubao' },
-  { label: '腾讯 TTS', value: 'tencent' },
-  { label: 'Azure TTS', value: 'azure' },
-];
+// Default Voice ID (温柔淑女)
+const DEFAULT_VOICE_ID = 'zh_female_wenroushunshun_mars_bigtts';
 
-const VOICE_PLACEHOLDERS: Record<string, string> = {
-  edge: 'zh-CN-XiaoxiaoNeural',
-  doubao: 'zh_female_xiaohe_uranus_bigtts',
-  tencent: '1001',
-  azure: 'zh-CN-XiaoxiaoNeural',
-};
+// Common voice options for Doubao TTS
+const VOICE_OPTIONS = [
+  { label: '温柔淑女（推荐）', value: 'zh_female_wenroushunshun_mars_bigtts' },
+  { label: '阳光青年', value: 'zh_male_yangguangqingnian_mars_bigtts' },
+  { label: '甜美桃子', value: 'zh_female_tianmeitaozi_mars_bigtts' },
+  { label: '爽快思思', value: 'zh_female_shuangkuaisisi_moon_bigtts' },
+  { label: '知性女声', value: 'zh_female_zhixingnvsheng_mars_bigtts' },
+  { label: '清爽男大', value: 'zh_male_qingshuangnanda_mars_bigtts' },
+  { label: '京腔侃爷', value: 'zh_male_jingqiangkanye_moon_bigtts' },
+  { label: '湾湾小何', value: 'zh_female_wanwanxiaohe_moon_bigtts' },
+  { label: '广州德哥', value: 'zh_male_guozhoudege_moon_bigtts' },
+  { label: '呆萌川妹', value: 'zh_female_daimengchuanmei_moon_bigtts' },
+  { label: '自定义输入...', value: '__custom__' },
+];
 
 type Step = 'upload' | 'submitting' | 'done' | 'error';
 
@@ -33,7 +39,9 @@ export default function AvatarCreatePage() {
   const [form] = Form.useForm();
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreview, setVideoPreview] = useState<string>('');
-  const [ttsType, setTtsType] = useState('edge');
+  const [selectedVoice, setSelectedVoice] = useState(DEFAULT_VOICE_ID);
+  const [customVoice, setCustomVoice] = useState('');
+  const [showCustomInput, setShowCustomInput] = useState(false);
   const [step, setStep] = useState<Step>('upload');
   const [progress, setProgress] = useState(0);
   const [, setCreatedId] = useState('');
@@ -61,8 +69,8 @@ export default function AvatarCreatePage() {
       const autoId = `avatar_${values.name.toLowerCase().replace(/\s+/g, '_')}_${Date.now()}`;
       formData.append('avatar_id', autoId);
       formData.append('name', values.name);
-      formData.append('tts_type', values.tts_type);
-      formData.append('voice_id', values.voice_id || VOICE_PLACEHOLDERS[values.tts_type]);
+      formData.append('tts_type', 'doubao');  // Changed from values.tts_type
+      formData.append('voice_id', selectedVoice === '__custom__' ? customVoice : selectedVoice);
       formData.append('video', videoFile);
 
       setProgress(40);
@@ -206,7 +214,7 @@ export default function AvatarCreatePage() {
           <Form
             form={form}
             layout="vertical"
-            initialValues={{ tts_type: 'edge', voice_id: 'zh-CN-XiaoxiaoNeural' }}
+            initialValues={{ voice_id: DEFAULT_VOICE_ID }}
           >
             {/* 视频上传 */}
             <div
@@ -286,33 +294,79 @@ export default function AvatarCreatePage() {
                 <Input placeholder="例如：小雅" size="large" style={{ borderRadius: 8 }} />
               </Form.Item>
 
-              <Form.Item
-                label={<span style={{ color: '#666' }}>语音引擎 (TTS)</span>}
-                name="tts_type"
-                rules={[{ required: true }]}
-              >
-                <Select
-                  options={TTS_OPTIONS}
-                  size="large"
-                  style={{ borderRadius: 8 }}
-                  onChange={(val) => {
-                    setTtsType(val);
-                    form.setFieldValue('voice_id', VOICE_PLACEHOLDERS[val]);
-                  }}
-                />
-              </Form.Item>
+              <div style={{ marginBottom: 24 }}>
+                <Text style={{ color: '#666', display: 'block', marginBottom: 8, fontSize: 14 }}>
+                  语音引擎 (TTS)
+                </Text>
+                <div style={{
+                  background: '#f5f5f5',
+                  padding: '10px 16px',
+                  borderRadius: 8,
+                  color: '#333',
+                  fontWeight: 500,
+                  fontSize: 14
+                }}>
+                  Doubao TTS
+                </div>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                  固定使用豆包语音合成，提供更自然的对话体验
+                </Text>
+              </div>
 
               <Form.Item
-                label={<span style={{ color: '#666' }}>语音 ID / Voice</span>}
+                label={
+                  <span style={{ color: '#666' }}>
+                    语音音色
+                    <Tooltip title="点击试听按钮可预览音色效果">
+                      <InfoCircleOutlined style={{ marginLeft: 4, color: '#999', fontSize: 12 }} />
+                    </Tooltip>
+                  </span>
+                }
                 name="voice_id"
-                tooltip="不同 TTS 引擎的 Voice ID 格式不同，请参照对应服务文档"
+                rules={[{ required: true, message: '请选择语音音色' }]}
+                initialValue={DEFAULT_VOICE_ID}
               >
-                <Input
-                  placeholder={VOICE_PLACEHOLDERS[ttsType]}
-                  size="large"
-                  style={{ borderRadius: 8 }}
-                />
+                <Space.Compact style={{ width: '100%' }}>
+                  <Select
+                    options={VOICE_OPTIONS}
+                    value={selectedVoice}
+                    onChange={(val) => {
+                      setSelectedVoice(val);
+                      setShowCustomInput(val === '__custom__');
+                      form.setFieldValue('voice_id', val === '__custom__' ? customVoice : val);
+                    }}
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="选择音色"
+                    style={{ flex: 1 }}
+                    size="large"
+                  />
+                </Space.Compact>
               </Form.Item>
+
+              {showCustomInput && (
+                <div style={{ marginBottom: 24, marginLeft: 8 }}>
+                  <Text style={{ color: '#666', fontSize: 14, display: 'block', marginBottom: 8 }}>
+                    自定义 Voice ID
+                  </Text>
+                  <Input
+                    placeholder="输入 Doubao Voice Type ID"
+                    value={customVoice}
+                    onChange={(e) => {
+                      setCustomVoice(e.target.value);
+                      form.setFieldValue('voice_id', e.target.value);
+                    }}
+                    style={{ borderRadius: 8 }}
+                    size="large"
+                  />
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                    完整音色列表请参考：
+                    <a href="https://www.volcengine.com/docs/6561/1257544" target="_blank" rel="noopener noreferrer">
+                      豆包语音音色列表
+                    </a>
+                  </Text>
+                </div>
+              )}
             </div>
 
             {/* 提交按钮 */}

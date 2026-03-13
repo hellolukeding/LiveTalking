@@ -74,6 +74,12 @@ def load_model(path):
 
 
 def load_avatar(avatar_id):
+    """
+    加载 avatar 数据，    同时返回帧数据和元数据（包括名字）
+
+    Returns:
+        tuple: (frame_list_cycle, face_list_cycle, coord_list_cycle, meta_dict)
+    """
     # Validate avatar_id format (only alphanumeric, underscore, hyphen)
     if not re.match(r'^[a-zA-Z0-9_-]+$', avatar_id):
         raise ValueError(f"Invalid avatar_id format: {avatar_id}")
@@ -90,6 +96,16 @@ def load_avatar(avatar_id):
     full_imgs_path = avatar_path / "full_imgs"
     face_imgs_path = avatar_path / "face_imgs"
     coords_path = avatar_path / "coords.pkl"
+    meta_path = avatar_path / "meta.json"
+
+    # 读取 meta.json 获取 avatar 名字
+    meta = {}
+    if meta_path.exists():
+        import json
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+
+    avatar_name = meta.get('name', avatar_id)  # 默认使用 avatar_id
 
     with open(coords_path, 'rb') as f:
         coord_list_cycle = pickle.load(f)
@@ -105,7 +121,7 @@ def load_avatar(avatar_id):
         os.path.splitext(os.path.basename(x))[0]))
     face_list_cycle = read_imgs(input_face_list)
 
-    return frame_list_cycle, face_list_cycle, coord_list_cycle
+    return frame_list_cycle, face_list_cycle, coord_list_cycle, avatar_name
 
 
 @torch.no_grad()
@@ -254,7 +270,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
 
 class LipReal(BaseReal):
     @torch.no_grad()
-    def __init__(self, opt, model, avatar):
+    def __init__(self, opt, model, avatar, avatar_name=None):
         super().__init__(opt)
         # self.opt = opt # shared with the trainer's opt to support in-place modification of rendering parameters.
         # self.W = opt.W
@@ -275,6 +291,8 @@ class LipReal(BaseReal):
         # self.__loadavatar()
         self.model = model
         self.frame_list_cycle, self.face_list_cycle, self.coord_list_cycle = avatar
+        # 存储 avatar 名字， 用于系统提示词
+        self.avatar_name = avatar_name or "小li"
 
         # 🚀 延迟初始化 ASR 以加快 /offer 响应速度
         # ASR 初始化可能涉及凭据验证等耗时操作，放在 render() 中异步执行

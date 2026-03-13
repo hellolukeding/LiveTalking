@@ -13,7 +13,6 @@ import {
   Descriptions,
   Form,
   Input,
-  Select,
   Skeleton,
   Space,
   Tag,
@@ -25,13 +24,6 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { AvatarMeta, getAvatar, updateAvatar } from '../api/avatar';
 
 const { Title, Text } = Typography;
-
-const TTS_OPTIONS = [
-  { label: 'Edge TTS (免费)', value: 'edge' },
-  { label: 'Doubao TTS', value: 'doubao' },
-  { label: '腾讯 TTS', value: 'tencent' },
-  { label: 'Azure TTS', value: 'azure' },
-];
 
 const StatusTag = ({ status }: { status: AvatarMeta['status'] }) => {
   if (status === 'ready') return <Tag icon={<CheckCircleOutlined />} color="success">可用</Tag>;
@@ -97,7 +89,7 @@ export default function AvatarDetailPage() {
     getAvatar(id)
       .then((meta) => {
         setAvatar(meta);
-        form.setFieldsValue({ name: meta.name, tts_type: meta.tts_type, voice_id: meta.voice_id });
+        form.setFieldsValue({ name: meta.name, voice_id: meta.voice_id });
       })
       .catch(() => setNotFound(true))
       .finally(() => setLoading(false));
@@ -107,7 +99,7 @@ export default function AvatarDetailPage() {
     try {
       const values = await form.validateFields();
       setSaving(true);
-      const updated = await updateAvatar(id!, values);
+      const updated = await updateAvatar(id!, { ...values, tts_type: 'doubao' });
       setAvatar(updated);
       antMessage.success('已保存');
     } catch (e: any) {
@@ -240,13 +232,24 @@ export default function AvatarDetailPage() {
                   <Input size="large" style={{ borderRadius: 8 }} />
                 </Form.Item>
 
-                <Form.Item
-                  label={<span style={{ color: '#666' }}>语音引擎 (TTS)</span>}
-                  name="tts_type"
-                  rules={[{ required: true }]}
-                >
-                  <Select options={TTS_OPTIONS} size="large" style={{ borderRadius: 8 }} />
-                </Form.Item>
+                <div style={{ marginBottom: 24 }}>
+                  <Text style={{ color: '#666', display: 'block', marginBottom: 8, fontSize: 14 }}>
+                    语音引擎 (TTS)
+                  </Text>
+                  <div style={{
+                    background: '#f5f5f5',
+                    padding: '10px 16px',
+                    borderRadius: 8,
+                    color: '#333',
+                    fontWeight: 500,
+                    fontSize: 14
+                  }}>
+                    Doubao TTS
+                  </div>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                    固定使用豆包语音合成
+                  </Text>
+                </div>
 
                 <Form.Item
                   label={<span style={{ color: '#666' }}>语音 ID / Voice ID</span>}

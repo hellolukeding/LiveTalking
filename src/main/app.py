@@ -928,6 +928,12 @@ async def avatar_create(request):
                 voice_id = (await field.read()).decode("utf-8").strip()
             elif field.name == "video":
                 import uuid
+                # Validate avatar_id format, regenerate if invalid
+                if avatar_id:
+                    from services.avatar_manager import validate_avatar_id
+                    if not validate_avatar_id(avatar_id):
+                        logger.warning(f"[AVATARS] Invalid avatar_id format: {avatar_id}, generating new one")
+                        avatar_id = f"avatar_{uuid.uuid4().hex[:8]}"
                 if not avatar_id:
                     avatar_id = f"avatar_{uuid.uuid4().hex[:8]}"
                 uploads_dir = "data/uploads"

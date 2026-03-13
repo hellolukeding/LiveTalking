@@ -22,6 +22,8 @@ import {
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { AvatarMeta, getAvatar, updateAvatar } from '../api/avatar';
+import { getApiBaseUrl } from '../api/client';
+import { getApiBaseUrl } from '../api/client';
 
 const { Title, Text } = Typography;
 
@@ -32,7 +34,11 @@ const StatusTag = ({ status }: { status: AvatarMeta['status'] }) => {
 };
 
 const AvatarImage = ({ avatar }: { avatar: AvatarMeta }) => {
-  const imagePath = avatar.image_path && avatar.status === 'ready' ? avatar.image_path : undefined;
+  // 使用后端真实地址拼接图片 URL
+  const apiBaseUrl = getApiBaseUrl();
+  const imagePath = avatar.image_path && avatar.status === 'ready'
+    ? `${apiBaseUrl}${avatar.image_path}`
+    : undefined;
 
   if (imagePath) {
     return (

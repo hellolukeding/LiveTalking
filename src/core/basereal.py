@@ -130,6 +130,70 @@ class BaseReal:
         self._audio_out_started = False
         self._audio_out_thread = None
 
+    @property
+    def _render_quit_event(self):
+        """Store render quit event for external access"""
+        return getattr(self, '__render_quit_event', None)
+
+    @property
+    def _infer_quit_event(self):
+        """Store inference quit event for external access"""
+        return getattr(self, '__infer_quit_event', None)
+
+    @property
+    def _process_quit_event(self):
+        """Store process quit event for external access"""
+        return getattr(self, '__process_quit_event', None)
+
+    def stop_all_threads(self):
+        """停止所有后台线程
+
+        当连接异常断开时，需要主动停止所有后台线程以避免资源泄漏。
+        包括：render主线程、infer_thread、process_thread、metrics_thread
+        """
+        logger.info(f"[BaseReal] stop_all_threads called for session {self.sessionid}")
+
+        # 停止所有退出事件
+        render_quit = self._render_quit_event
+        if render_quit:
+            render_quit.set()
+            logger.debug(f"[BaseReal] Set render_quit_event for session {self.sessionid}")
+
+        infer_quit = self._infer_quit_event
+        if infer_quit:
+            infer_quit.set()
+            logger.debug(f"[BaseReal] Set infer_quit_event for session {self.sessionid}")
+
+        process_quit = self._process_quit_event
+        if process_quit:
+            process_quit.set()
+            logger.debug(f"[BaseReal] Set process_quit_event for session {self.sessionid}")
+
+        # 停止metrics线程
+        try:
+            self._metrics_running = False
+        except Exception:
+            pass
+
+        # 等待线程结束（带超时避免永久阻塞）
+        infer_thread = getattr(self, '_infer_thread', None)
+        if infer_thread and infer_thread.is_alive():
+            infer_thread.join(timeout=5.0)
+            if infer_thread.is_alive():
+                logger.warning(f"[BaseReal] Infer thread still alive after timeout for session {self.sessionid}")
+
+        process_thread = getattr(self, '_process_thread', None)
+        if process_thread and process_thread.is_alive():
+            process_thread.join(timeout=5.0)
+            if process_thread.is_alive():
+                logger.warning(f"[BaseReal] Process thread still alive after timeout for session {self.sessionid}")
+
+        metrics_thread = getattr(self, '_metrics_thread', None)
+        if metrics_thread and metrics_thread.is_alive():
+            metrics_thread.join(timeout=1.0)
+
+        logger.info(f"[BaseReal] stop_all_threads completed for session {self.sessionid}")
+
     def start_audio_out_worker(self, quit_event: Event):
         """
         Start a background worker that releases delayed audio frames at real-time cadence.

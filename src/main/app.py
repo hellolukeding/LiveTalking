@@ -98,19 +98,22 @@ def randN(N) -> int:
 
 
 def build_nerfreal(sessionid: int) -> BaseReal:
-    opt.sessionid = sessionid
-    if opt.model == 'wav2lip':
+    # 🆕 修复：创建副本避免修改全局 opt，防止并发会话冲突
+    import copy
+    opt_copy = copy.copy(opt)
+    opt_copy.sessionid = sessionid
+    if opt_copy.model == 'wav2lip':
         from lipreal import LipReal
-        nerfreal = LipReal(opt, model, avatar)
-    elif opt.model == 'musetalk':
+        nerfreal = LipReal(opt_copy, model, avatar)
+    elif opt_copy.model == 'musetalk':
         from musereal import MuseReal
-        nerfreal = MuseReal(opt, model, avatar)
-    # elif opt.model == 'ernerf':
+        nerfreal = MuseReal(opt_copy, model, avatar)
+    # elif opt_copy.model == 'ernerf':
     #     from nerfreal import NeRFReal
-    #     nerfreal = NeRFReal(opt,model,avatar)
-    elif opt.model == 'ultralight':
+    #     nerfreal = NeRFReal(opt_copy,model,avatar)
+    elif opt_copy.model == 'ultralight':
         from lightreal import LightReal
-        nerfreal = LightReal(opt, model, avatar)
+        nerfreal = LightReal(opt_copy, model, avatar)
     return nerfreal
 
 # @app.route('/offer', methods=['POST'])
@@ -290,6 +293,16 @@ async def offer(request):
 
                 # Close peer connection and cleanup
                 try:
+                    # 🆕 主动停止 nerfreal 的所有线程，防止资源泄漏
+                    if sessionid in nerfreals:
+                        nerfreal = nerfreals[sessionid]
+                        try:
+                            if hasattr(nerfreal, 'stop_all_threads'):
+                                logger.info(f"[WEBRTC] Calling stop_all_threads for session {sessionid}")
+                                nerfreal.stop_all_threads()
+                        except Exception as e:
+                            logger.error(f"[WEBRTC] Error stopping threads for session {sessionid}: {e}")
+
                     await pc.close()
                     pcs.discard(pc)
                     if sessionid in nerfreals:
@@ -317,6 +330,16 @@ async def offer(request):
                             player.video.stop()
                     except Exception as e:
                         logger.error(f"[WEBRTC] Error stopping tracks on ICE state change: {str(e)}")
+
+                # 🆕 主动停止 nerfreal 的所有线程，防止资源泄漏
+                if sessionid in nerfreals:
+                    nerfreal = nerfreals[sessionid]
+                    try:
+                        if hasattr(nerfreal, 'stop_all_threads'):
+                            logger.info(f"[WEBRTC] ICE: Calling stop_all_threads for session {sessionid}")
+                            nerfreal.stop_all_threads()
+                    except Exception as e:
+                        logger.error(f"[WEBRTC] ICE: Error stopping threads for session {sessionid}: {e}")
 
         # Create tracks
         try:
@@ -983,7 +1006,7 @@ async def run(push_url, sessionid):
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         logger.info("Connection state is %s" % pc.connectionState)
-        if pc.connectionState == "failed":
+        if pc.connectionState in ("disconnected", "failed", "closed"):
             # Stop the player's tracks to signal frame processing thread
             if sessionid in webrtc_players:
                 player = webrtc_players[sessionid]
@@ -996,6 +1019,17 @@ async def run(push_url, sessionid):
                     logger.error(f"[WEBRTC] Error stopping tracks: {str(e)}")
                 finally:
                     del webrtc_players[sessionid]
+
+            # 🆕 主动停止 nerfreal 的所有线程，防止资源泄漏
+            if sessionid in nerfreals:
+                nerfreal = nerfreals[sessionid]
+                try:
+                    if hasattr(nerfreal, 'stop_all_threads'):
+                        logger.info(f"[WEBRTC] Human: Calling stop_all_threads for session {sessionid}")
+                        nerfreal.stop_all_threads()
+                except Exception as e:
+                    logger.error(f"[WEBRTC] Human: Error stopping threads for session {sessionid}: {e}")
+
             await pc.close()
             pcs.discard(pc)
             if sessionid in nerfreals:

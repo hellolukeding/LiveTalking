@@ -433,6 +433,9 @@ class LipReal(BaseReal):
         self.audio_track = audio_track
         self.loop = loop
 
+        # 🆕 存储 render quit_event 作为实例变量，方便外部清理时访问
+        self.__render_quit_event = quit_event
+
         # 🚀 延迟初始化 ASR 和 TTS（首次 render 时执行）
         self._ensure_asr_initialized()
         self._ensure_tts_initialized()
@@ -456,15 +459,20 @@ class LipReal(BaseReal):
         except Exception:
             logger.debug('Failed to flush pending audio frames on render')
 
+        # 🆕 使用实例变量存储线程和事件，方便外部访问
         infer_quit_event = Event()
+        self.__infer_quit_event = infer_quit_event
         infer_thread = Thread(target=inference, args=(infer_quit_event, self.batch_size, self.face_list_cycle,
                                                       self.lip_asr.feat_queue, self.lip_asr.output_queue, self.res_frame_queue,
                                                       self.model, self))  # mp.Process
+        self._infer_thread = infer_thread
         infer_thread.start()
 
         process_quit_event = Event()
+        self.__process_quit_event = process_quit_event
         process_thread = Thread(target=self.process_frames, args=(
             process_quit_event, loop, audio_track, video_track))
+        self._process_thread = process_thread
         process_thread.start()
 
         # self.render_event.set() #start infer process render

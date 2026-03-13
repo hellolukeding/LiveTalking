@@ -133,6 +133,37 @@ async def offer(request):
                 status=400
             )
 
+        # Validate avatar_id parameter
+        avatar_id = params.get('avatar_id')
+        if not avatar_id:
+            logger.error("[OFFER] avatar_id is required")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "avatar_id is required"}),
+                status=400
+            )
+
+        # Validate avatar exists and is ready
+        from services.avatar_manager import get_avatar
+        avatar_meta = get_avatar(avatar_id)
+        if not avatar_meta:
+            logger.error(f"[OFFER] Avatar not found: {avatar_id}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": f"Avatar not found: {avatar_id}"}),
+                status=400
+            )
+
+        if avatar_meta.get('status') != 'ready':
+            logger.error(f"[OFFER] Avatar not ready: {avatar_id}, status={avatar_meta.get('status')}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": f"Avatar not ready: {avatar_id}"}),
+                status=400
+            )
+
+        logger.info(f"[OFFER] Using avatar: {avatar_id}")
+
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
         logger.debug(
             f"[OFFER] Created RTCSessionDescription: type={params['type']}")

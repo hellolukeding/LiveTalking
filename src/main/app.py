@@ -1149,9 +1149,9 @@ if __name__ == '__main__':
     elif opt.model == 'wav2lip':
         from lipreal import LipReal, load_avatar, load_model, warm_up
         logger.info(opt)
-        model = load_model("./models/wav2lip256.pth")
+        model = load_model("./models/wav2lip384.pth")
         avatar = load_avatar(opt.avatar_id)
-        warm_up(opt.batch_size, model, 256)
+        warm_up(opt.batch_size, model, 384)
     elif opt.model == 'ultralight':
         from lightreal import LightReal, load_avatar, load_model, warm_up
         logger.info(opt)

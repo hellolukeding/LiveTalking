@@ -38,7 +38,7 @@ from logger import logger
 from tencentasr import TencentApiAsr
 from tqdm import tqdm
 
-from wav2lip.models.wav2lip_v2 import Wav2Lip
+from wav2lip.models.wav2lip_384 import Wav2Lip
 
 # from imgcache import ImgCache
 

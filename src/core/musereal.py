@@ -224,7 +224,7 @@ def inference(quit_event, batch_size, input_latent_list_cycle, audio_feat_queue,
 
 class MuseReal(BaseReal):
     @torch.no_grad()
-    def __init__(self, opt, model, avatar):
+    def __init__(self, opt, model, avatar, avatar_name=None):
         super().__init__(opt)
         # self.opt = opt # shared with the trainer's opt to support in-place modification of rendering parameters.
         # self.W = opt.W
@@ -238,6 +238,8 @@ class MuseReal(BaseReal):
 
         self.vae, self.unet, self.pe, self.timesteps, self.audio_processor = model
         self.frame_list_cycle, self.mask_list_cycle, self.coord_list_cycle, self.mask_coords_list_cycle, self.input_latent_list_cycle = avatar
+        # 存储 avatar 名字， 用于系统提示词
+        self.avatar_name = avatar_name or "小助手"
         # self.__loadavatar()
 
         # 🚀 延迟初始化 ASR 以加快 /offer 响应速度

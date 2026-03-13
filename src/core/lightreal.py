@@ -233,7 +233,7 @@ def inference(quit_event, batch_size, face_list_cycle, audio_feat_queue, audio_o
 
 class LightReal(BaseReal):
     @torch.no_grad()
-    def __init__(self, opt, model, avatar):
+    def __init__(self, opt, model, avatar, avatar_name=None):
         super().__init__(opt)
         # self.opt = opt # shared with the trainer's opt to support in-place modification of rendering parameters.
         # self.W = opt.W
@@ -247,6 +247,8 @@ class LightReal(BaseReal):
         # self.__loadavatar()
         self.audio_processor = model
         self.model, self.frame_list_cycle, self.face_list_cycle, self.coord_list_cycle = avatar
+        # 存储 avatar 名字， 用于系统提示词
+        self.avatar_name = avatar_name or "小助手"
 
         # 🚀 延迟初始化 ASR 以加快 /offer 响应速度
         self.asr = None

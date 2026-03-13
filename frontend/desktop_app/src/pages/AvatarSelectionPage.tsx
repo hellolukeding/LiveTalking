@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { Card, Col, message, Row, Spin, Tag, Typography } from 'antd';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { listAvatars, AvatarMeta } from '../api/avatar';
 
 const { Title, Text } = Typography;
@@ -9,6 +9,7 @@ export default function AvatarSelectionPage() {
   const navigate = useNavigate();
   const [avatars, setAvatars] = useState<AvatarMeta[]>([]);
   const [loading, setLoading] = useState(true);
+  const [imageErrors, setImageErrors] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     loadAvatars();
@@ -27,9 +28,13 @@ export default function AvatarSelectionPage() {
     }
   };
 
-  const handleSelectAvatar = (avatarId: string) => {
+  const handleSelectAvatar = useCallback((avatarId: string) => {
     navigate(`/videochat?avatar_id=${avatarId}`);
-  };
+  }, [navigate]);
+
+  const handleImageError = useCallback((avatarId: string) => {
+    setImageErrors(prev => new Set(prev).add(avatarId));
+  }, []);
 
   if (loading) {
     return (
@@ -58,17 +63,18 @@ export default function AvatarSelectionPage() {
           <Col xs={24} sm={12} md={8} lg={6} key={avatar.avatar_id}>
             <Card
               hoverable
-              cover={avatar.image_path ? (
+              cover={avatar.image_path && !imageErrors.has(avatar.avatar_id) ? (
                 <div style={{ height: '200px', overflow: 'hidden', background: '#f0f0f0' }}>
                   <img
                     alt={avatar.name}
-                    src={`http://localhost:8010${avatar.image_path}`}
+                    src={avatar.image_path}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    onError={() => handleImageError(avatar.avatar_id)}
                   />
                 </div>
               ) : (
                 <div style={{ height: '200px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f0f0f0' }}>
-                  <Text type="secondary">无预览图</Text>
+                  <Text type="secondary">{imageErrors.has(avatar.avatar_id) ? '图片加载失败' : '无预览图'}</Text>
                 </div>
               )}
               onClick={() => handleSelectAvatar(avatar.avatar_id)}

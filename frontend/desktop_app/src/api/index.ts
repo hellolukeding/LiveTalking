@@ -13,8 +13,22 @@ export interface OfferResponse {
 }
 
 export const negotiateOffer = async (payload: OfferPayload): Promise<OfferResponse> => {
-    const response = await client.post<OfferResponse>('/offer', payload);
-    return response.data;
+    try {
+        console.log('[API] Sending WebRTC offer to:', client.defaults.baseURL + '/offer');
+        console.log('[API] Offer payload:', { avatar_id: payload.avatar_id, type: payload.type });
+        const response = await client.post<OfferResponse>('/offer', payload);
+        console.log('[API] WebRTC offer response received:', { status: response.status, hasData: !!response.data });
+        return response.data;
+    } catch (error: any) {
+        console.error('[API] WebRTC offer failed:', {
+            message: error.message,
+            status: error.response?.status,
+            statusText: error.response?.statusText,
+            data: error.response?.data,
+            url: client.defaults.baseURL + '/offer'
+        });
+        throw error;
+    }
 };
 
 export const sendHumanMessage = async (text: string, sessionId: string, interrupt: boolean = true) => {

@@ -44,6 +44,9 @@ class SessionProcess:
         self.process: Optional[multiprocessing.Process] = None
         self.pid: Optional[int] = None
 
+        # 共享状态（用于主进程查询）
+        self.speaking_value: Optional[multiprocessing.Value] = None
+
         # 进程间通信队列
         self.command_queue: Optional[multiprocessing.Queue] = None
         self.audio_queue: Optional[multiprocessing.Queue] = None
@@ -65,6 +68,7 @@ class SessionProcess:
             self.audio_queue = multiprocessing.Queue(maxsize=100)
             self.video_queue = multiprocessing.Queue(maxsize=100)
             self.status_queue = multiprocessing.Queue(maxsize=10)
+            self.speaking_value = multiprocessing.Value('b', False)
 
             # 创建并启动进程
             self.process = multiprocessing.Process(
@@ -76,7 +80,8 @@ class SessionProcess:
                     self.command_queue,
                     self.audio_queue,
                     self.video_queue,
-                    self.status_queue
+                    self.status_queue,
+                    self.speaking_value,
                 ),
                 daemon=False
             )
@@ -199,7 +204,8 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                   command_queue: multiprocessing.Queue,
                   audio_queue: multiprocessing.Queue,
                   video_queue: multiprocessing.Queue,
-                  status_queue: multiprocessing.Queue):
+                  status_queue: multiprocessing.Queue,
+                  speaking_value: multiprocessing.Value):
     """
     子进程主函数 - 完整版本，实现音视频帧传输
     """
@@ -222,10 +228,22 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
     quit_event = Event()
 
     try:
+        # 确保子进程 sys.path 完整（避免依赖父进程启动方式）
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        src_root = os.path.join(project_root, "src")
+        for p in [
+            project_root,
+            src_root,
+            os.path.join(src_root, "core"),
+            os.path.join(src_root, "llm"),
+            os.path.join(src_root, "utils"),
+            os.path.join(src_root, "main"),
+        ]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
         # 导入必要的模块（在子进程中）
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
         from core.lipreal import LipReal
-        from aiortc import MediaStreamTrack
 
         # 初始化 LipReal
         nerfreal = build_nerfreal_subprocess(session_id, avatar_id, opt)
@@ -296,6 +314,64 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
         fake_video = FakeVideoTrack(video_queue)
 
         logger.info(f"[Session-{session_id}] Using direct frame writers")
+
+        # 命令处理线程：主进程通过 command_queue 控制说话/打断/停止
+        def command_loop():
+            logger.info(f"[Session-{session_id}] Command loop started")
+            while not quit_event.is_set():
+                try:
+                    cmd = command_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error(f"[Session-{session_id}] Command queue error: {e}")
+                    continue
+
+                if cmd is None:
+                    continue
+                if not isinstance(cmd, dict):
+                    logger.warning(f"[Session-{session_id}] Invalid command type: {type(cmd)}")
+                    continue
+
+                action = cmd.get("action")
+                try:
+                    if action == "stop":
+                        logger.info(f"[Session-{session_id}] Received stop command")
+                        quit_event.set()
+                        break
+                    elif action == "interrupt":
+                        if hasattr(nerfreal, "flush_talk"):
+                            nerfreal.flush_talk()
+                            logger.info(f"[Session-{session_id}] Interrupted talk")
+                    elif action == "say":
+                        text = (cmd.get("text") or "").strip()
+                        if not text:
+                            continue
+                        datainfo = cmd.get("datainfo") or {}
+                        if hasattr(nerfreal, "put_msg_txt"):
+                            nerfreal.put_msg_txt(text, datainfo)
+                            logger.info(f"[Session-{session_id}] Queued text: {text[:30]}...")
+                    else:
+                        logger.warning(f"[Session-{session_id}] Unknown action: {action}")
+                except Exception as e:
+                    logger.error(f"[Session-{session_id}] Command handling error: {e}")
+
+            logger.info(f"[Session-{session_id}] Command loop stopped")
+
+        command_thread = Thread(target=command_loop, daemon=True)
+        command_thread.start()
+
+        # 说话状态同步线程（供主进程 is_speaking 查询）
+        def speaking_monitor():
+            while not quit_event.is_set():
+                try:
+                    speaking_value.value = bool(getattr(nerfreal, "speaking", False))
+                except Exception:
+                    pass
+                time.sleep(0.2)
+
+        speaking_thread = Thread(target=speaking_monitor, daemon=True)
+        speaking_thread.start()
 
         # 启动 LipReal 渲染（使用假的轨道）
         loop = asyncio.new_event_loop()
@@ -377,6 +453,8 @@ def build_nerfreal_subprocess(session_id: str, avatar_id: str, opt: Any):
     # 添加 sessionid 到 opt
     opt.sessionid = session_id
     from core.lipreal import LipReal, load_model, load_avatar
+    import json
+    from pathlib import Path
 
     # 加载模型（全局单例，只加载一次）
     if not hasattr(build_nerfreal_subprocess, '_model'):
@@ -386,11 +464,24 @@ def build_nerfreal_subprocess(session_id: str, avatar_id: str, opt: Any):
 
     model = build_nerfreal_subprocess._model
 
+    # 读取 avatar meta.json（设置 avatar_name / voice_id）
+    avatar_name = avatar_id
+    try:
+        meta_path = Path("./data/avatars") / avatar_id / "meta.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            avatar_name = meta.get("name", avatar_name)
+            voice_id = meta.get("voice_id")
+            if voice_id:
+                opt.REF_FILE = voice_id
+    except Exception as e:
+        logger.warning(f"[Session-{session_id}] Failed to load avatar meta.json: {e}")
+
     # 加载 avatar (load_avatar 返回 4 个值，只传前 3 个给 LipReal)
     frame_list, face_list, coord_list, _ = load_avatar(avatar_id)
     logger.info(f"[Session-{session_id}] Avatar loaded: {avatar_id}")
 
     # 创建 LipReal 实例
-    nerfreal = LipReal(opt, model, (frame_list, face_list, coord_list))
+    nerfreal = LipReal(opt, model, (frame_list, face_list, coord_list), avatar_name)
 
     return nerfreal

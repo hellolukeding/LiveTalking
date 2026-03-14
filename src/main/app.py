@@ -96,6 +96,67 @@ logger.info(f"[APP] Process isolation: {USE_PROCESS_ISOLATION}")
 model = None
 avatar = None
 
+def _load_avatar_meta_for_proxy(avatar_id: str):
+    import json
+    from pathlib import Path
+
+    avatar_name = avatar_id
+    voice_id = getattr(opt, 'REF_FILE', 'zh_female_xiaohe_uranus_bigtts')
+    try:
+        meta_path = Path(f"./data/avatars/{avatar_id}/meta.json")
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            avatar_name = meta.get("name", avatar_name)
+            voice_id = meta.get("voice_id", voice_id)
+    except Exception as e:
+        logger.warning(f"[BUILD] Failed to load meta.json for {avatar_id}: {e}")
+    return avatar_name, voice_id
+
+
+class SubprocessNerfrealProxy:
+    """
+    在进程隔离模式下的 BaseReal 代理：
+    - put_msg_txt/flush_talk 通过 command_queue 转发到子进程
+    - is_speaking 读取共享 speaking_value
+    """
+
+    def __init__(self, session, avatar_name: str, voice_id: str):
+        self._session = session
+        self.avatar_name = avatar_name
+        self.voice_id = voice_id
+
+    def put_msg_txt(self, msg, datainfo: dict = {}):
+        try:
+            if not self._session or not getattr(self._session, "command_queue", None):
+                return
+            self._session.command_queue.put(
+                {"action": "say", "text": msg, "datainfo": datainfo or {}},
+                block=False,
+            )
+            if hasattr(self._session, "update_activity"):
+                self._session.update_activity()
+        except Exception as e:
+            logger.error(f"[Proxy] Failed to send say command: {e}")
+
+    def flush_talk(self):
+        try:
+            if not self._session or not getattr(self._session, "command_queue", None):
+                return
+            self._session.command_queue.put({"action": "interrupt"}, block=False)
+            if hasattr(self._session, "update_activity"):
+                self._session.update_activity()
+        except Exception as e:
+            logger.error(f"[Proxy] Failed to send interrupt command: {e}")
+
+    def is_speaking(self) -> bool:
+        try:
+            v = getattr(self._session, "speaking_value", None)
+            if v is None:
+                return False
+            return bool(v.value)
+        except Exception:
+            return False
+
 
 ##### webrtc###############################
 pcs = set()
@@ -505,36 +566,38 @@ async def offer(request):
                 
                 logger.info(f"[OFFER] Session {sessionid} created with pid={session.pid}")
                 
-                # 将会话存储到 nerfreals 中（兼容后续逻辑）
+                # 进程隔离：主进程不再构建 nerfreal（避免“控制面/数据面”错位）
+                avatar_name, voice_id = _load_avatar_meta_for_proxy(avatar_id)
+                proxy = SubprocessNerfrealProxy(session, avatar_name, voice_id)
                 async with nerfreals_lock:
-                    nerfreals[sessionid] = session  # 存储SessionProcess对象
+                    nerfreals[sessionid] = proxy
+                logger.info(f"[OFFER] Proxy installed for session {sessionid}: avatar={avatar_name}, voice_id={voice_id}")
+            else:
+                # Build nerfreal in executor to avoid blocking (with timeout)
+                try:
+                    nerfreal = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id),
+                        timeout=30.0  # 30 秒超时
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"[OFFER] 构建超时，会话 {sessionid}")
+                    async with nerfreals_lock:
+                        if sessionid in nerfreals:
+                            del nerfreals[sessionid]
+                    return web.Response(
+                        content_type="application/json",
+                        text=json.dumps({"code": -1, "msg": "初始化超时"}),
+                        status=504
+                    )
 
+                if nerfreal is None:
+                    raise RuntimeError("Failed to build nerfreal instance")
 
-            # Build nerfreal in executor to avoid blocking (with timeout)
-            try:
-                nerfreal = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id),
-                    timeout=30.0  # 30 秒超时
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"[OFFER] 构建超时，会话 {sessionid}")
+                # Update nerfreal with lock
                 async with nerfreals_lock:
-                    if sessionid in nerfreals:
-                        del nerfreals[sessionid]
-                return web.Response(
-                    content_type="application/json",
-                    text=json.dumps({"code": -1, "msg": "初始化超时"}),
-                    status=504
-                )
-
-            if nerfreal is None:
-                raise RuntimeError("Failed to build nerfreal instance")
-
-            # Update nerfreal with lock
-            async with nerfreals_lock:
-                nerfreals[sessionid] = nerfreal
-            logger.debug(
-                f"[OFFER] Nerfreal built successfully for session {sessionid}")
+                    nerfreals[sessionid] = nerfreal
+                logger.debug(
+                    f"[OFFER] Nerfreal built successfully for session {sessionid}")
 
         except Exception as e:
             logger.error(f"[OFFER] Failed to build nerfreal: {str(e)}")

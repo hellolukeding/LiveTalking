@@ -283,13 +283,12 @@ class BaseReal:
                 time.sleep(0.005)
                 continue
 
-            # Best-effort push; if the queue is full, we drop to avoid backpressure.
+            # 使用阻塞式 put() 确保所有音频帧都被发送
             if hasattr(self, "audio_track") and self.audio_track and hasattr(self, "loop") and self.loop and self.loop.is_running():
                 try:
-                    self.loop.call_soon_threadsafe(
-                        self.audio_track._queue.put_nowait, item)
-                except Exception:
-                    pass
+                    asyncio.run_coroutine_threadsafe(self.audio_track._queue.put(item), self.loop)
+                except Exception as e:
+                    logger.debug(f"[AUDIO_OUT] Failed to send frame: {e}")
 
             # Maintain real-time pacing (20ms per frame at 50fps).
             next_send_time = max(next_send_time + self._audio_out_period_s, time.perf_counter())
@@ -348,18 +347,18 @@ class BaseReal:
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
         """音频帧转发给 ASR（口型驱动）"""
         self._last_audio_in_time = time.perf_counter()
-        
-        # 转发给ASR（口型驱动）
-        if hasattr(self, 'asr'):
+
+        # 转发给ASR（口型驱动）- 修复：检查is not None而不是hasattr
+        if hasattr(self, 'asr') and self.asr is not None:
             try:
                 self.asr.put_audio_frame(audio_chunk, datainfo)
-            except Exception:
-                pass
-        elif hasattr(self, 'lip_asr'):
+            except Exception as e:
+                logger.debug(f"[BASE_REAL] ASR put_audio_frame error: {e}")
+        elif hasattr(self, 'lip_asr') and self.lip_asr is not None:
             try:
                 self.lip_asr.put_audio_frame(audio_chunk, datainfo)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[BASE_REAL] LipASR put_audio_frame error: {e}")
 
     def _flush_pending_audio(self):
         """尝试把缓冲区中的帧 flush 到音轨队列中。"""
@@ -377,56 +376,26 @@ class BaseReal:
                 self._enqueue_audio_out(f, d)
             return
 
-        # 🆕 修复：优先使用self.loop
+        # 使用阻塞式 put() 确保所有待发送的音频帧都被发送（参考 /opt/LiveTalking）
         queue_loop = getattr(self, 'loop', None)
         if queue_loop and queue_loop.is_running():
             sent = 0
-            failed = []
-
-            async def _try_put(q, item):
-                try:
-                    q.put_nowait(item)
-                    return True
-                except asyncio.QueueFull:
-                    return False
-
             for f, d in pending:
-                attempt = 0
-                success = False
-                # 尝试多次放入队列以处理短暂的队列满情况
-                while attempt < 3 and not success:
-                    attempt += 1
-                    try:
-                        fut = asyncio.run_coroutine_threadsafe(
-                            _try_put(self.audio_track._queue, (f, d)), queue_loop)
-                        ok = fut.result(timeout=0.5)
-                        if ok:
-                            sent += 1
-                            success = True
-                            break
-                        else:
-                            # 等待一小段时间再重试
-                            time.sleep(0.01)
-                    except Exception as e:
-                        logger.warning(
-                            f"[BASE_REAL] Failed to flush pending audio frame (attempt {attempt}): {e}")
-                        time.sleep(0.01)
-                if not success:
-                    failed.append((f, d))
-
-            # 如果有未发送的帧，放回_pending_audio头部
-            if failed:
-                with self._pending_audio_lock:
-                    self._pending_audio = failed + self._pending_audio
-
-            logger.info(
-                f"[BASE_REAL] Flushed {sent} pending audio frames to track (remaining pending: {len(self._pending_audio)})")
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.audio_track._queue.put((f, d)), queue_loop).result(timeout=1.0)
+                    sent += 1
+                except Exception as e:
+                    logger.warning(f"[BASE_REAL] Failed to flush pending audio frame: {e}")
+                    # 放回队列头部稍后重试
+                    with self._pending_audio_lock:
+                        self._pending_audio.append((f, d))
+            logger.info(f"[BASE_REAL] Flushed {sent} pending audio frames to track")
         else:
             # 如果仍然没有事件循环，则重新放回缓冲区
             with self._pending_audio_lock:
                 self._pending_audio = pending + self._pending_audio
-            logger.debug(
-                "[BASE_REAL] Could not flush pending audio: queue loop not running")
+            logger.debug("[BASE_REAL] Could not flush pending audio: queue loop not running")
 
     def put_audio_file(self, filebyte, datainfo: dict = {}):
         input_stream = BytesIO(filebyte)
@@ -787,22 +756,8 @@ class BaseReal:
                 try:
                     image = combine_frame
                     new_frame = VideoFrame.from_ndarray(image, format="bgr24")
-                    if video_track and video_track._queue:
-                        # 🆕 修复：使用call_soon_threadsafe + put_nowait，避免阻塞提高FPS
-                        try:
-                            loop.call_soon_threadsafe(
-                                video_track._queue.put_nowait, (new_frame, None))
-                        except Exception as queue_err:
-                            # 队列满时丢弃帧，避免阻塞
-                            try:
-                                self._video_drop_count += 1
-                            except Exception:
-                                pass
-                            logger.debug(
-                                f"[PROCESS_FRAMES] Video queue full, dropping frame (total_dropped={getattr(self, '_video_drop_count', 0)})")
-                    else:
-                        logger.debug(
-                            f"[PROCESS_FRAMES] Video track or queue is None!")
+                    # 使用阻塞式 put() 确保所有帧都被发送（参考 /opt/LiveTalking/basereal.py）
+                    asyncio.run_coroutine_threadsafe(video_track._queue.put((new_frame, None)), loop)
                 except Exception as e:
                     logger.debug(
                         f"[PROCESS_FRAMES] Failed to send video frame: {str(e)}")
@@ -820,11 +775,8 @@ class BaseReal:
                     new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
                     new_frame.planes[0].update(frame.tobytes())
                     new_frame.sample_rate = 16000
-                    if audio_track and audio_track._queue:
-                        asyncio.run_coroutine_threadsafe(
-                            audio_track._queue.put((new_frame, eventpoint)), loop)
-                    else:
-                        logger.debug("[PROCESS_FRAMES] Audio track or queue is None!")
+                    # 使用阻塞式 put() 确保所有音频帧都被发送（参考 /opt/LiveTalking/basereal.py）
+                    asyncio.run_coroutine_threadsafe(audio_track._queue.put((new_frame, eventpoint)), loop)
                 self.record_audio_data(frame)
 
             if self.opt.transport == 'virtualcam':

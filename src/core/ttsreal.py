@@ -1018,7 +1018,27 @@ class DoubaoWebSocketConnection:
         return time.time() - self.last_used > timeout
 
     def is_healthy(self) -> bool:
-        """检查连接健康状态"""
+        """检查连接健康状态 - 改进版，检测死连接"""
+        # 检查WebSocket对象是否存在
+        if self.ws is None:
+            return False
+
+        # 检查error_count是否超过阈值
+        if self.error_count >= 3:
+            return False
+
+        # 检查连接是否仍然打开
+        try:
+            # 检查WebSocket对象的connected状态
+            if hasattr(self.ws, 'connected') and not self.ws.connected:
+                self.is_connected = False
+                logger.debug(f"[WS_MANAGER] 检测到WebSocket已断开 (connected=False)")
+                return False
+        except Exception as e:
+            self.is_connected = False
+            logger.debug(f"[WS_MANAGER] 检查连接状态异常: {e}")
+            return False
+
         return self.is_connected and self.error_count < 3
 
 
@@ -1056,11 +1076,23 @@ class DoubaoConnectionPool:
             f"[WS_POOL] 连接池初始化: sample_rate={sample_rate}, max_connections={max_connections}")
 
     def _warmup_worker(self):
-        """预热连接的后台线程"""
+        """预热连接的后台线程 - 改进版，添加健康监控"""
+        last_check_time = time.time()
         while self._running:
             try:
+                current_size = self._ready_connections.qsize()
+
+                # 🆕 每30秒记录一次池健康状态
+                if time.time() - last_check_time > 30:
+                    hit_rate = self.cache_hits / self.total_requests if self.total_requests > 0 else 0
+                    logger.info(
+                        f"[WS_POOL] 健康状态: 大小={current_size}/{self.max_connections}, "
+                        f"命中率={hit_rate:.1%}, 总请求={self.total_requests}, "
+                        f"未命中={self.total_connections - self.cache_hits}")
+                    last_check_time = time.time()
+
                 # 检查是否需要预热
-                if self._ready_connections.qsize() < self.max_connections:
+                if current_size < self.max_connections:
                     conn = self._create_new_connection()
                     if conn:
                         try:
@@ -1147,13 +1179,24 @@ class DoubaoConnectionPool:
         else:
             logger.warning(f"[WS_POOL] 连接不健康 (error_count={conn.error_count})，关闭并重新创建")
             conn.close()
-            # 尝试创建新连接补充池子
-            try:
+            # 🆕 改进：确保新连接成功创建并加入池子，增加重试逻辑
+            max_retries = 3
+            for retry in range(max_retries):
                 new_conn = self._create_new_connection()
                 if new_conn:
-                    self._ready_connections.put(new_conn, timeout=0.5)
-            except:
-                pass
+                    try:
+                        self._ready_connections.put(new_conn, timeout=2.0)  # 增加超时到2秒
+                        logger.info(f"[WS_POOL] 不健康连接已替换 (池大小: {self._ready_connections.qsize()})")
+                        break
+                    except queue.Full:
+                        logger.debug(f"[WS_POOL] 连接池已满，关闭新连接")
+                        new_conn.close()
+                        break
+                    except Exception as e:
+                        logger.debug(f"[WS_POOL] 归还新连接异常: {e}")
+                logger.warning(f"[WS_POOL] 重试创建连接 {retry+1}/{max_retries}")
+                if retry < max_retries - 1:
+                    time.sleep(0.1)  # 短暂等待后重试
 
     def get_stats(self):
         """获取统计"""

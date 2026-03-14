@@ -357,12 +357,32 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                 try:
                     if action == "stop":
                         logger.info(f"[Session-{session_id}] Received stop command")
+                        # Best-effort drain to stop playback quickly
+                        try:
+                            for _ in range(2000):
+                                _v = audio_queue.get_nowait()
+                                del _v
+                        except Exception:
+                            pass
+                        try:
+                            for _ in range(200):
+                                _v = video_queue.get_nowait()
+                                del _v
+                        except Exception:
+                            pass
                         quit_event.set()
                         break
                     elif action == "interrupt":
                         if hasattr(nerfreal, "flush_talk"):
                             nerfreal.flush_talk()
                             logger.info(f"[Session-{session_id}] Interrupted talk")
+                        # Drain queued frames so main process stops sending old audio immediately.
+                        try:
+                            for _ in range(2000):
+                                _v = audio_queue.get_nowait()
+                                del _v
+                        except Exception:
+                            pass
                     elif action == "say":
                         text = (cmd.get("text") or "").strip()
                         if not text:

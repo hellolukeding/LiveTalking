@@ -69,6 +69,7 @@ from webrtc import HumanPlayer
 # 进程隔离相关导入
 from session_manager import SessionManager
 from queue_track import QueueAudioTrack, QueueVideoTrack
+from conversation_orchestrator import ConversationOrchestrator
 from services.avatar_manager import (
     list_avatars, get_avatar, update_avatar, delete_avatar,
     generate_avatar_async
@@ -161,6 +162,8 @@ class SubprocessNerfrealProxy:
 ##### webrtc###############################
 pcs = set()
 webrtc_players: Dict[int, HumanPlayer] = {}  # sessionid:HumanPlayer
+session_orchestrators: Dict[int, ConversationOrchestrator] = {}
+audio_ingest_tasks: Dict[int, asyncio.Task] = {}
 
 # ========== 安全修复：频率限制器和会话锁 ==========
 import time
@@ -572,6 +575,10 @@ async def offer(request):
                 async with nerfreals_lock:
                     nerfreals[sessionid] = proxy
                 logger.info(f"[OFFER] Proxy installed for session {sessionid}: avatar={avatar_name}, voice_id={voice_id}")
+                try:
+                    session_orchestrators[sessionid] = ConversationOrchestrator(sessionid, proxy, opt, avatar_name=avatar_name)
+                except Exception as e:
+                    logger.warning(f"[OFFER] Failed to create orchestrator for session {sessionid}: {e}")
             else:
                 # Build nerfreal in executor to avoid blocking (with timeout)
                 try:
@@ -598,6 +605,15 @@ async def offer(request):
                     nerfreals[sessionid] = nerfreal
                 logger.debug(
                     f"[OFFER] Nerfreal built successfully for session {sessionid}")
+                try:
+                    session_orchestrators[sessionid] = ConversationOrchestrator(
+                        sessionid,
+                        nerfreal,
+                        getattr(nerfreal, "opt", opt),
+                        avatar_name=getattr(nerfreal, "avatar_name", "小助手"),
+                    )
+                except Exception as e:
+                    logger.warning(f"[OFFER] Failed to create orchestrator for session {sessionid}: {e}")
 
         except Exception as e:
             logger.error(f"[OFFER] Failed to build nerfreal: {str(e)}")
@@ -647,6 +663,9 @@ async def offer(request):
                 nerfreals[sessionid].loop = asyncio.get_event_loop()
                 logger.debug(
                     f"[WEBRTC] Data channel initialized for session {sessionid}")
+                orch = session_orchestrators.get(sessionid)
+                if orch:
+                    orch.set_datachannel(channel, asyncio.get_event_loop())
             except Exception as e:
                 logger.error(
                     f"[WEBRTC] Failed to initialize data channel: {str(e)}")
@@ -658,45 +677,35 @@ async def offer(request):
             if track.kind == "audio":
                 logger.debug(
                     f"[WEBRTC] Audio track received for session {sessionid}")
-                # 将接收到的音频传递给ASR系统
+                # 将接收到的音频交给编排器（VAD->ASR->LLM->TTS）
 
                 @track.on("ended")
                 def on_ended():
                     logger.debug(
                         f"[WEBRTC] Audio track ended for session {sessionid}")
+                    task = audio_ingest_tasks.pop(sessionid, None)
+                    if task:
+                        task.cancel()
 
                 # 处理接收到的音频帧
                 async def process_audio_frames():
                     try:
                         while True:
                             frame = await track.recv()
-                            # 将AudioFrame转换为numpy数组
-                            if hasattr(frame, 'to_ndarray'):
-                                audio_array = frame.to_ndarray()
-                                # 转换为单声道和float32格式
-                                if audio_array.ndim > 1:
-                                    audio_array = audio_array[:, 0]
-                                audio_array = audio_array.astype(np.float32)
-
-                                # 传递给ASR系统
-                                if hasattr(nerfreals[sessionid], 'add_asr_audio'):
-                                    # 传递给LipReal的ASR缓冲区（用于文本识别）
-                                    nerfreals[sessionid].add_asr_audio(
-                                        audio_array)
-                                elif hasattr(nerfreals[sessionid], 'lip_asr'):
-                                    # 传递给LipASR用于口型驱动
-                                    nerfreals[sessionid].lip_asr.put_audio_frame(
-                                        audio_array, {})
-                                elif hasattr(nerfreals[sessionid], 'asr'):
-                                    # 传递给其他ASR实现（如MuseASR）
-                                    nerfreals[sessionid].asr.put_audio_frame(
-                                        audio_array, {})
+                            if not hasattr(frame, 'to_ndarray'):
+                                continue
+                            audio_array = frame.to_ndarray()
+                            sample_rate = getattr(frame, "sample_rate", None)
+                            orch = session_orchestrators.get(sessionid)
+                            if orch:
+                                orch.ingest_audio(audio_array, sample_rate)
                     except Exception as e:
                         logger.error(
                             f"[WEBRTC] Error processing audio frames: {str(e)}")
 
                 # 启动音频处理任务
-                asyncio.create_task(process_audio_frames())
+                if sessionid not in audio_ingest_tasks or audio_ingest_tasks[sessionid].done():
+                    audio_ingest_tasks[sessionid] = asyncio.create_task(process_audio_frames())
             else:
                 logger.warning(
                     f"[WEBRTC] Received non-audio track: {track.kind}")
@@ -745,6 +754,11 @@ async def offer(request):
                     pcs.discard(pc)
                     if sessionid in nerfreals:
                         del nerfreals[sessionid]
+                    if sessionid in session_orchestrators:
+                        del session_orchestrators[sessionid]
+                    task = audio_ingest_tasks.pop(sessionid, None)
+                    if task:
+                        task.cancel()
                     logger.debug(
                         f"[WEBRTC] Cleaned up {pc.connectionState} session {sessionid}")
                 except Exception as e:
@@ -779,6 +793,11 @@ async def offer(request):
                             nerfreal.stop_all_threads()
                     except Exception as e:
                         logger.error(f"[WEBRTC] ICE: Error stopping threads for session {sessionid}: {e}")
+                task = audio_ingest_tasks.pop(sessionid, None)
+                if task:
+                    task.cancel()
+                if sessionid in session_orchestrators:
+                    del session_orchestrators[sessionid]
 
         # Create tracks
         try:
@@ -1644,6 +1663,13 @@ async def on_shutdown(app):
             logger.error(f"[SHUTDOWN] 清理会话 {sessionid} 失败: {e}")
     
     nerfreals.clear()
+    session_orchestrators.clear()
+    for _, task in list(audio_ingest_tasks.items()):
+        try:
+            task.cancel()
+        except Exception:
+            pass
+    audio_ingest_tasks.clear()
 
     # 清理所有会话进程
     await session_manager.destroy_all()

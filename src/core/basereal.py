@@ -427,6 +427,19 @@ class BaseReal:
         return stream
 
     def flush_talk(self):
+        # Clear any queued/buffered outgoing audio frames to make barge-in truly immediate.
+        try:
+            if hasattr(self, "_audio_out_lock") and hasattr(self, "_audio_out_buffer"):
+                with self._audio_out_lock:
+                    self._audio_out_buffer.clear()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_pending_audio_lock") and hasattr(self, "_pending_audio"):
+                with self._pending_audio_lock:
+                    self._pending_audio.clear()
+        except Exception:
+            pass
         if self.tts:
             self.tts.flush_talk()
         # 兼容不同的ASR实现

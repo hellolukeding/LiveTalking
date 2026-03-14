@@ -478,18 +478,22 @@ class LipReal(BaseReal):
         _starttime = time.perf_counter()
         # _totalframe=0
 
-        # 腾讯ASR相关变量
-        # 腾讯ASR相关变量
+        # Tencent ASR (server-side) is now orchestrated in the main process (VAD->ASR->LLM->TTS).
+        # Keep the old periodic ASR path behind a flag to avoid duplicate / burst triggers.
+        internal_tencent_asr = os.getenv("INTERNAL_TENCENT_ASR", "false").lower() == "true"
         asr_count = 0
-        # 支持通过环境变量调整 ASR 触发频率与采样时长，便于在延迟/准确率之间权衡
-        try:
-            asr_interval = int(os.getenv('ASR_INTERVAL_FRAMES', '25'))
-        except Exception:
-            asr_interval = 25
-        try:
-            asr_duration_ms = int(os.getenv('TENCENT_ASR_DURATION_MS', '1000'))
-        except Exception:
-            asr_duration_ms = 1000
+        asr_interval = 25
+        asr_duration_ms = 1000
+        if internal_tencent_asr:
+            # 支持通过环境变量调整 ASR 触发频率与采样时长，便于在延迟/准确率之间权衡
+            try:
+                asr_interval = int(os.getenv('ASR_INTERVAL_FRAMES', '25'))
+            except Exception:
+                asr_interval = 25
+            try:
+                asr_duration_ms = int(os.getenv('TENCENT_ASR_DURATION_MS', '1000'))
+            except Exception:
+                asr_duration_ms = 1000
 
         while not quit_event.is_set():
             # update texture every frame
@@ -499,9 +503,10 @@ class LipReal(BaseReal):
             if self.lip_asr:
                 self.lip_asr.run_step()
 
-            # 定期运行腾讯ASR进行文本识别
-            asr_count += 1
-            if asr_count >= asr_interval and self.tencent_asr:
+            # 定期运行腾讯ASR进行文本识别（legacy path）
+            if internal_tencent_asr:
+                asr_count += 1
+            if internal_tencent_asr and asr_count >= asr_interval and self.tencent_asr:
                 asr_count = 0
                 # 收集音频数据并运行腾讯ASR
                 try:

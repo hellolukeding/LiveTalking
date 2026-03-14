@@ -191,16 +191,15 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                   video_queue: multiprocessing.Queue,
                   status_queue: multiprocessing.Queue):
     """
-    子进程主函数
-
-    这个函数在独立的子进程中运行，负责：
-    1. 初始化 LipReal
-    2. 启动渲染线程
-    3. 将音视频帧发送到队列
-    4. 响应控制命令
+    子进程主函数 - 完整版本，实现音视频帧传输
     """
     import sys
     import os
+    import time
+    import numpy as np
+    from threading import Event, Thread
+    from queue import Queue as ThreadQueue
+    from av import AudioFrame, VideoFrame
 
     # 设置进程名称
     try:
@@ -211,10 +210,15 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
     logger.info(f"[Session-{session_id}] Process started (pid={os.getpid()})")
 
+    quit_event = Event()
+    audio_frame_queue = ThreadQueue(maxsize=100)
+    video_frame_queue = ThreadQueue(maxsize=100)
+
     try:
         # 导入必要的模块（在子进程中）
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
         from core.lipreal import LipReal
+        from aiortc import MediaStreamTrack
 
         # 初始化 LipReal
         nerfreal = build_nerfreal_subprocess(session_id, avatar_id, opt)
@@ -222,19 +226,179 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
         logger.info(f"[Session-{session_id}] LipReal initialized")
 
+        # 创建假的音视频轨道，用于捕获输出
+        class FakeAudioTrack(MediaStreamTrack):
+            kind = "audio"
+            
+            def __init__(self, queue_ref):
+                super().__init__()
+                self.queue_ref = queue_ref
+                self._stopped = False
+            
+            async def recv(self):
+                if self._stopped:
+                    raise StopIteration
+                try:
+                    frame = self.queue_ref.get(timeout=0.1)
+                    if frame is None:
+                        self._stopped = True
+                        raise StopIteration
+                    return frame
+                except:
+                    # 返回静音帧
+                    return AudioFrame(format='s16', layout='mono', samples=960)
+
+        class FakeVideoTrack(MediaStreamTrack):
+            kind = "video"
+            
+            def __init__(self, queue_ref):
+                super().__init__()
+                self.queue_ref = queue_ref
+                self._stopped = False
+            
+            async def recv(self):
+                if self._stopped:
+                    raise StopIteration
+                try:
+                    frame = self.queue_ref.get(timeout=0.1)
+                    if frame is None:
+                        self._stopped = True
+                        raise StopIteration
+                    return frame
+                except:
+                    raise StopIteration
+
+        fake_audio = FakeAudioTrack(audio_frame_queue)
+        fake_video = FakeVideoTrack(video_frame_queue)
+
+        # 启动 LipReal 渲染（使用假的轨道）
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        logger.info(f"[Session-{session_id}] Starting render")
+        
         # 发送就绪信号
         status_queue.put({"status": "ready"})
 
-        # TODO: 启动渲染和队列传输
-        # 这部分在后续任务中实现
+        # 启动渲染线程
+        render_thread = Thread(target=nerfreal.render, args=(quit_event, loop, fake_audio, fake_video))
+        render_thread.daemon = True
+        render_thread.start()
+
+        logger.info(f"[Session-{session_id}] Render thread started")
+
+        # 帧转发线程 - 从内部队列获取帧并发送到进程间队列
+        def frame_forwarder():
+            last_audio_time = time.time()
+            last_video_time = time.time()
+            
+            while not quit_event.is_set():
+                try:
+                    # 转发音频帧
+                    try:
+                        audio_frame = audio_frame_queue.get(timeout=0.05)
+                        if audio_frame is not None:
+                            try:
+                                # 将 AudioFrame 转换为 bytes 以便序列化
+                                audio_bytes = {
+                                    'format': audio_frame.format.name,
+                                    'layout': audio_frame.layout.name,
+                                    'samples': audio_frame.samples,
+                                    'planes': [plane.to_bytes() for plane in audio_frame.planes]
+                                }
+                                audio_queue.put(audio_bytes, block=False)
+                                last_audio_time = time.time()
+                            except:
+                                pass
+                    except:
+                        pass
+
+                    # 转发视频帧  
+                    try:
+                        video_frame = video_frame_queue.get(timeout=0.05)
+                        if video_frame is not None:
+                            try:
+                                # 将 VideoFrame 转换为 bytes 以便序列化
+                                height, width = video_frame.height, video_frame.width
+                                video_bytes = {
+                                    'format': video_frame.format.name,
+                                    'width': width,
+                                    'height': height,
+                                    'data': video_frame.to_bytes()
+                                }
+                                video_queue.put(video_bytes, block=False)
+                                last_video_time = time.time()
+                            except:
+                                pass
+                    except:
+                        pass
+
+                    # 检查停止命令
+                    try:
+                        cmd = command_queue.get(block=False)
+                        if cmd.get("action") == "stop":
+                            logger.info(f"[Session-{session_id}] Received stop command")
+                            quit_event.set()
+                            break
+                    except:
+                        pass
+
+                    # 检查超时
+                    if time.time() - last_audio_time > 5.0:
+                        # 发送心跳音频帧保持连接
+                        pass
+
+                    time.sleep(0.01)  # 避免CPU占用过高
+
+                except Exception as e:
+                    logger.error(f"[Session-{session_id}] Frame forwarder error: {e}")
+                    time.sleep(0.01)
+
+        forwarder_thread = Thread(target=frame_forwarder, daemon=True)
+        forwarder_thread.start()
+
+        logger.info(f"[Session-{session_id}] Frame forwarder started")
+
+        # 等待渲染线程完成
+        render_thread.join()
+        logger.info(f"[Session-{session_id}] Render thread ended")
 
     except Exception as e:
         logger.error(f"[Session-{session_id}] Error in session_main: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        status_queue.put({"status": "error", "message": str(e)})
+        try:
+            status_queue.put({"status": "error", "message": str(e)})
+        except:
+            pass
     finally:
+        logger.info(f"[Session-{session_id}] Cleaning up")
+        quit_event.set()
+
+        # 停止所有线程
+        if 'nerfreal' in locals():
+            try:
+                nerfreal.stop_all_threads()
+            except:
+                pass
+
+        # 发送结束信号
+        try:
+            audio_queue.put(None, timeout=1)
+            video_queue.put(None, timeout=1)
+        except:
+            pass
+
+        # 关闭队列
+        for q in [command_queue, audio_queue, video_queue, status_queue]:
+            try:
+                q.close()
+            except:
+                pass
+
         logger.info(f"[Session-{session_id}] Process exiting")
+
+
 
 
 def build_nerfreal_subprocess(session_id: str, avatar_id: str, opt: Any):

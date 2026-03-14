@@ -250,6 +250,77 @@ async def safe_request_post(request, max_size=MAX_AUDIO_SIZE):
         raise
 
 
+    async def monitor_task():
+        """监控任务：检测异常状态并记录"""
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                
+                # 检查活跃请求数量
+                active_count = len(timeout_stats['active_requests'])
+                if active_count > 0:
+                    logger.info(f"[监控] 活跃请求: {active_count}")
+                
+                # 检查超时统计
+                if timeout_stats['timeouts'] > 0:
+                    logger.warning(f"[监控] 超时统计: 总计 {timeout_stats['timeouts']} 次")
+                    if timeout_stats['last_timeout']:
+                        last = timeout_stats['last_timeout']
+                        logger.warning(f"[监控] 最后超时: {last}")
+                
+                # 检查会话状态
+                session_count = len(nerfreals)
+                if session_count > 0:
+                    logger.info(f"[监控] 活跃会话: {session_count}")
+                    
+                    # 检查是否有僵尸会话（会话存在但没有活动）
+                    cleanup_count = 0
+                    for sessionid in list(nerfreals.keys()):
+                        nerfreal = nerfreals[sessionid]
+                        if nerfreal is None:
+                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (None)")
+                            del nerfreals[sessionid]
+                            cleanup_count += 1
+                        elif not hasattr(nerfreal, 'datachannel') or nerfreal.datachannel is None:
+                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (无 datachannel)")
+                            try:
+                                if hasattr(nerfreal, 'stop_all_threads'):
+                                    nerfreal.stop_all_threads()
+                            except:
+                                pass
+                            del nerfreals[sessionid]
+                            cleanup_count += 1
+                    
+                    if cleanup_count > 0:
+                        logger.info(f"[监控] 已清理 {cleanup_count} 个僵尸会话")
+                    
+            except Exception as e:
+                logger.error(f"[监控] 监控任务异常: {e}")
+    
+    # 配置默认CORS设置
+    cors = aiohttp_cors.setup(appasync, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+        )
+    })
+    # 在所有路由上配置CORS
+    for route in list(appasync.router.routes()):
+        cors.add(route)
+
+    pagename = 'webrtcapi.html'
+    if opt.transport == 'rtmp':
+        pagename = 'echoapi.html'
+    elif opt.transport == 'rtcpush':
+        pagename = 'rtcpushapi.html'
+    logger.info('start http server; http://<serverip>:' +
+                str(opt.listenport)+'/'+pagename)
+    logger.info('如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:' +
+                str(opt.listenport)+'/dashboard.html')
+
+
+
 def randN(N) -> int:
     '''生成长度为 N的随机数 '''
     min = pow(10, N - 1)
@@ -1407,15 +1478,9 @@ async def on_startup(app):
     """应用启动时初始化监控和清理"""
     logger.info("[启动] 应用启动初始化...")
     
-    # 异步启动监控任务（不阻塞启动）
-    async def start_monitor_later():
-        await asyncio.sleep(2)  # 等待应用完全启动
-        logger.info("[启动] 启动监控任务...")
-        asyncio.create_task(monitor_task())
-        logger.info("[启动] 监控任务已创建")
-    
-    asyncio.create_task(start_monitor_later())
-    logger.info("[启动] 启动初始化完成")
+    # 直接在后台启动监控任务
+    asyncio.create_task(monitor_task())
+    logger.info("[启动] 监控任务已创建")
 
 
 async def on_shutdown(app):
@@ -1661,75 +1726,6 @@ if __name__ == '__main__':
     appasync.router.add_static('/', path='frontend/web')
 
     # ========== 启动监控任务 ==========
-    async def monitor_task():
-        """监控任务：检测异常状态并记录"""
-        while True:
-            try:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
-                
-                # 检查活跃请求数量
-                active_count = len(timeout_stats['active_requests'])
-                if active_count > 0:
-                    logger.info(f"[监控] 活跃请求: {active_count}")
-                
-                # 检查超时统计
-                if timeout_stats['timeouts'] > 0:
-                    logger.warning(f"[监控] 超时统计: 总计 {timeout_stats['timeouts']} 次")
-                    if timeout_stats['last_timeout']:
-                        last = timeout_stats['last_timeout']
-                        logger.warning(f"[监控] 最后超时: {last}")
-                
-                # 检查会话状态
-                session_count = len(nerfreals)
-                if session_count > 0:
-                    logger.info(f"[监控] 活跃会话: {session_count}")
-                    
-                    # 检查是否有僵尸会话（会话存在但没有活动）
-                    cleanup_count = 0
-                    for sessionid in list(nerfreals.keys()):
-                        nerfreal = nerfreals[sessionid]
-                        if nerfreal is None:
-                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (None)")
-                            del nerfreals[sessionid]
-                            cleanup_count += 1
-                        elif not hasattr(nerfreal, 'datachannel') or nerfreal.datachannel is None:
-                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (无 datachannel)")
-                            try:
-                                if hasattr(nerfreal, 'stop_all_threads'):
-                                    nerfreal.stop_all_threads()
-                            except:
-                                pass
-                            del nerfreals[sessionid]
-                            cleanup_count += 1
-                    
-                    if cleanup_count > 0:
-                        logger.info(f"[监控] 已清理 {cleanup_count} 个僵尸会话")
-                    
-            except Exception as e:
-                logger.error(f"[监控] 监控任务异常: {e}")
-    
-    # 配置默认CORS设置
-    cors = aiohttp_cors.setup(appasync, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-        )
-    })
-    # 在所有路由上配置CORS
-    for route in list(appasync.router.routes()):
-        cors.add(route)
-
-    pagename = 'webrtcapi.html'
-    if opt.transport == 'rtmp':
-        pagename = 'echoapi.html'
-    elif opt.transport == 'rtcpush':
-        pagename = 'rtcpushapi.html'
-    logger.info('start http server; http://<serverip>:' +
-                str(opt.listenport)+'/'+pagename)
-    logger.info('如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:' +
-                str(opt.listenport)+'/dashboard.html')
-
     def run_server(runner):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

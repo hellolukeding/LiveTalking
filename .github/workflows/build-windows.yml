@@ -9,13 +9,10 @@ on:
         required: false
         default: ''
 
-  # 推送到 build-windows 分支时触发
+  # 推送到 build-windows 分支时触发，或推送 tag 时触发
   push:
     branches:
       - build-windows
-
-  # 推送 tag 时触发
-  push:
     tags:
       - 'v*'
 

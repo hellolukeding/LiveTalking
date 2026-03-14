@@ -90,6 +90,9 @@ logger.info("[APP] SessionManager initialized")
 # sockets = Sockets(app)
 nerfreals: Dict[int, BaseReal] = {}  # sessionid:BaseReal
 opt = None
+# 进程隔离配置开关
+USE_PROCESS_ISOLATION = os.getenv("USE_PROCESS_ISOLATION", "true").lower() == "true"
+logger.info(f"[APP] Process isolation: {USE_PROCESS_ISOLATION}")
 model = None
 avatar = None
 
@@ -487,6 +490,26 @@ async def offer(request):
 
             logger.debug(f"[OFFER] Building nerfreal for session {sessionid}")
 
+            # 选择使用进程隔离还是原有模式
+            if USE_PROCESS_ISOLATION:
+                logger.info(f"[OFFER] Using process isolation mode for session {sessionid}")
+                
+                # 使用 SessionManager 创建会话进程
+                session = await session_manager.create_session(sessionid, avatar_id, opt)
+                if not session:
+                    return web.Response(
+                        content_type="application/json",
+                        text=json.dumps({"code": -1, "msg": "Failed to create session"}),
+                        status=500
+                    )
+                
+                logger.info(f"[OFFER] Session {sessionid} created with pid={session.pid}")
+                
+                # 将会话存储到 nerfreals 中（兼容后续逻辑）
+                async with nerfreals_lock:
+                    nerfreals[sessionid] = session  # 存储SessionProcess对象
+
+
             # Build nerfreal in executor to avoid blocking (with timeout)
             try:
                 nerfreal = await asyncio.wait_for(
@@ -641,8 +664,12 @@ async def offer(request):
 
                 # Close peer connection and cleanup
                 try:
-                    # 🆕 主动停止 nerfreal 的所有线程，防止资源泄漏
-                    if sessionid in nerfreals:
+                    # 🆕 进程隔离模式：销毁会话进程
+                    if USE_PROCESS_ISOLATION and session_manager.has_session(sessionid):
+                        logger.info(f"[WEBRTC] Destroying session process {sessionid}")
+                        await session_manager.destroy_session(sessionid)
+                    elif sessionid in nerfreals:
+                        # 原有模式：停止 nerfreal 的所有线程
                         nerfreal = nerfreals[sessionid]
                         try:
                             if hasattr(nerfreal, 'stop_all_threads'):
@@ -694,6 +721,21 @@ async def offer(request):
         try:
             logger.debug(
                 f"[OFFER] Creating media tracks for session {sessionid}")
+
+            if USE_PROCESS_ISOLATION:
+                # 使用进程隔离模式：从队列读取
+                logger.debug(f"[OFFER] Using queue tracks for session {sessionid}")
+                audio_track = QueueAudioTrack(session.audio_queue, sessionid)
+                video_track = QueueVideoTrack(session.video_queue, sessionid)
+                
+                # 创建简化的 player（只保存引用）
+                player = type("Player", (), {
+                    "audio": audio_track,
+                    "video": video_track,
+                    "session": session
+                })()
+            else:
+                # 使用原有模式：直接访问 nerfreal
             player = HumanPlayer(nerfreals[sessionid])
             webrtc_players[sessionid] = player  # Store player reference for cleanup
             audio_sender = pc.addTrack(player.audio)
@@ -846,6 +888,7 @@ async def offer(request):
                 "sdp": pc.localDescription.sdp,
                 "type": pc.localDescription.type,
                 "sessionid": sessionid,
+                "destroy_url": f"/api/session/{sessionid}/destroy",
                 "code": 0
             }),
         )

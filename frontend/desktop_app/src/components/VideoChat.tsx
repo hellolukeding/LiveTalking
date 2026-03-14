@@ -265,7 +265,14 @@ export default function VideoChat() {
                         console.log('[ASR] ✓ Found audio input devices');
                     }
 
-                    return navigator.mediaDevices.getUserMedia({ audio: true });
+                    return navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                            channelCount: 1
+                        }
+                    });
                 })
                 .then((stream) => {
                     isRequestingMicPermissionRef.current = false; // 重置请求状态

@@ -348,17 +348,21 @@ class BaseReal:
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
         """音频帧转发 - 简化版"""
         self._last_audio_in_time = time.perf_counter()
-        # 转发给ASR（口型驱动）
-        if hasattr(self, 'asr'):
-            try:
-                self.asr.put_audio_frame(audio_chunk, datainfo)
-            except Exception:
-                pass
-        elif hasattr(self, 'lip_asr'):
-            try:
-                self.lip_asr.put_audio_frame(audio_chunk, datainfo)
-            except Exception:
-                pass
+        
+        # 🔇 回声消除：TTS播放时不处理ASR，防止数字人听到自己的声音
+        # curr_state > 1 表示正在播放自定义音频（TTS）
+        if self.curr_state <= 1:  # 只在未播放TTS时处理ASR
+            # 转发给ASR（口型驱动）
+            if hasattr(self, 'asr'):
+                try:
+                    self.asr.put_audio_frame(audio_chunk, datainfo)
+                except Exception:
+                    pass
+            elif hasattr(self, 'lip_asr'):
+                try:
+                    self.lip_asr.put_audio_frame(audio_chunk, datainfo)
+                except Exception:
+                    pass
 
         # 转发给WebRTC
         try:

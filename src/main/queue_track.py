@@ -5,6 +5,7 @@ import asyncio
 import logging
 import fractions
 import time
+import os
 import numpy as np
 from av import AudioFrame, VideoFrame
 from aiortc import MediaStreamTrack
@@ -23,6 +24,8 @@ DEFAULT_VIDEO_PTS_STEP = int(VIDEO_CLOCK_RATE / DEFAULT_VIDEO_FPS)  # 3600 @ 25f
 
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
 DEFAULT_AUDIO_SAMPLES = int(DEFAULT_AUDIO_SAMPLE_RATE * 0.020)  # 20ms -> 320
+DEFAULT_AUDIO_JITTER_WAIT_S = float(os.getenv("AUDIO_JITTER_WAIT_MS", "10")) / 1000.0
+DEFAULT_VIDEO_JITTER_WAIT_S = float(os.getenv("VIDEO_JITTER_WAIT_MS", "20")) / 1000.0
 
 
 class AVSyncClock:
@@ -89,13 +92,27 @@ class QueueAudioTrack(MediaStreamTrack):
             self._start_time = await self.clock.mark_ready_and_wait(self.kind)
             self._timestamp = 0
 
-        # Strict lip-sync: use a short blocking get (in a thread) to avoid synthetic jitter caused by nowait().
+        # Pace to the wall clock based on the RTP timestamp we are about to emit.
+        # NOTE: aiortc sends as fast as recv() returns; pacing here prevents burst-send then starvation.
+        sample_rate_hint = DEFAULT_AUDIO_SAMPLE_RATE
+        target_time = self._start_time + (self._timestamp / sample_rate_hint)
+        now = time.perf_counter()
+        wait = target_time - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        # Prefer non-blocking dequeue; if producer stalls, synthesize silence to keep the audio clock continuous.
         try:
-            frame_data = await asyncio.to_thread(self.queue.get, True, 1.0)
+            frame_data = self.queue.get_nowait()
             got_item = True
         except std_queue.Empty:
-            frame_data = None
-            got_item = False
+            # Small jitter wait: if producer is slightly late, wait a bit instead of injecting silence.
+            try:
+                frame_data = await asyncio.to_thread(self.queue.get, True, DEFAULT_AUDIO_JITTER_WAIT_S)
+                got_item = True
+            except std_queue.Empty:
+                frame_data = None
+                got_item = False
 
         if got_item and frame_data is None:
             logger.info(f"[QueueAudioTrack] Session {self.session_id} received end signal")
@@ -123,13 +140,6 @@ class QueueAudioTrack(MediaStreamTrack):
                 audio_frame.sample_rate = sample_rate
 
         sample_rate = int(getattr(audio_frame, "sample_rate", None) or DEFAULT_AUDIO_SAMPLE_RATE)
-
-        # Pace to the wall clock based on the RTP timestamp we are about to emit.
-        target_time = self._start_time + (self._timestamp / sample_rate)
-        now = time.perf_counter()
-        wait = target_time - now
-        if wait > 0:
-            await asyncio.sleep(wait)
 
         audio_frame.pts = self._timestamp
         audio_frame.time_base = fractions.Fraction(1, sample_rate)
@@ -164,25 +174,30 @@ class QueueVideoTrack(MediaStreamTrack):
             self._start_time = await self.clock.mark_ready_and_wait(self.kind)
             self._timestamp = 0
 
-        # Strict lip-sync: block (in a thread) waiting for real frames when possible.
-        try:
-            frame_data = await asyncio.to_thread(self.queue.get, True, 1.0)
-            got_item = True
-        except std_queue.Empty:
-            frame_data = None
-            got_item = False
-
-        if got_item and frame_data is None:
-            logger.info(f"[QueueVideoTrack] Session {self.session_id} received end signal")
-            self._stopped = True
-            raise StopIteration
-
         # Pace to wall clock.
         target_time = self._start_time + (self._timestamp / VIDEO_CLOCK_RATE)
         now = time.perf_counter()
         wait = target_time - now
         if wait > 0:
             await asyncio.sleep(wait)
+
+        # Prefer non-blocking dequeue; if producer stalls, repeat last frame (keeps video clock continuous).
+        try:
+            frame_data = self.queue.get_nowait()
+            got_item = True
+        except std_queue.Empty:
+            # Small jitter wait: let slightly-late frames catch up to avoid visible stutter.
+            try:
+                frame_data = await asyncio.to_thread(self.queue.get, True, DEFAULT_VIDEO_JITTER_WAIT_S)
+                got_item = True
+            except std_queue.Empty:
+                frame_data = None
+                got_item = False
+
+        if got_item and frame_data is None:
+            logger.info(f"[QueueVideoTrack] Session {self.session_id} received end signal")
+            self._stopped = True
+            raise StopIteration
 
         if not got_item:
             # Fallback: repeat last frame (or black frame if none).

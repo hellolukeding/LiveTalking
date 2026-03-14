@@ -560,6 +560,21 @@ class LipReal(BaseReal):
             # delay = _starttime+_totalframe*0.04-time.perf_counter() #40ms
             # if delay > 0:
             #     time.sleep(delay)
+
+            # === Real-time throttle (critical for smooth TTS) ===
+            # LipASR.run_step() consumes (batch_size*2) audio frames (20ms each).
+            # If we loop faster than real-time while TTS has buffered audio, we will:
+            #   - generate A/V far ahead of playback,
+            #   - overflow bounded mp queues,
+            #   - drop audio frames -> audible stutter.
+            try:
+                period_s = (float(self.batch_size) * 2.0) / float(self.fps)
+                elapsed = time.perf_counter() - t
+                sleep_s = period_s - elapsed
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+            except Exception:
+                pass
         # self.render_event.clear() #end infer process render
         logger.debug('lipreal thread stop')
 

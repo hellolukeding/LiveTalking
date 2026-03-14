@@ -22,7 +22,7 @@ import math
 # from .utils import *
 import os
 import pickle
-# import queue  # 移除标准库 queue，使用 multiprocessing 的 Queue
+import queue  # 需要用于 queue.Empty 异常
 import re
 import time
 # from queue import Queue  # 移除标准库 Queue，使用 mp.Queue

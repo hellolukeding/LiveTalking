@@ -154,7 +154,7 @@ export default function AvatarListPage() {
       return;
     }
     message.success(`已选择「${avatar.name}」，正在跳转...`);
-    navigate(`/?avatar_id=${avatar.avatar_id}`);
+    navigate(`/videochat?avatar_id=${avatar.avatar_id}`);
   };
 
   return (

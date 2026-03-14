@@ -1,4 +1,6 @@
 var pc = null;
+var sessionId = null;
+var destroyUrl = null;
 
 function negotiate() {
     pc.addTransceiver('video', { direction: 'recvonly' });
@@ -42,6 +44,11 @@ function negotiate() {
     }).then((response) => {
         return response.json();
     }).then((answer) => {
+        // 保存 sessionid 和 destroy_url
+        sessionId = answer.sessionid;
+        destroyUrl = answer.destroy_url || null;
+        console.log('[Connect] Session created:', sessionId, 'Destroy URL:', destroyUrl);
+
         document.getElementById('sessionid').value = answer.sessionid
         return pc.setRemoteDescription(answer);
     }).catch((e) => {
@@ -74,31 +81,83 @@ function start() {
     document.getElementById('stop').style.display = 'inline-block';
 }
 
+async function destroySession() {
+    """销毁会话"""
+    if (!sessionId || !destroyUrl) {
+        console.log('[Destroy] No session to destroy');
+        return;
+    }
+
+    console.log('[Destroy] Destroying session:', sessionId);
+
+    try {
+        const response = await fetch(destroyUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({})
+        });
+
+        if (response.ok) {
+            console.log('[Destroy] Session destroyed successfully');
+        } else {
+            console.error('[Destroy] Failed to destroy session, status:', response.status);
+        }
+    } catch (e) {
+        console.error('[Destroy] Error destroying session:', e);
+    }
+
+    // 清理变量
+    sessionId = null;
+    destroyUrl = null;
+}
+
 function stop() {
     document.getElementById('stop').style.display = 'none';
 
-    // close peer connection
-    setTimeout(() => {
-        pc.close();
-    }, 500);
+    // 先销毁会话，然后关闭连接
+    destroySession().finally(() => {
+        // close peer connection
+        setTimeout(() => {
+            pc.close();
+            pc = null;
+        }, 500);
+    });
 }
 
 window.onunload = function(event) {
-    // 在这里执行你想要的操作
+    // 在页面卸载时销毁会话
+    destroySession();
+
     setTimeout(() => {
-        pc.close();
+        if (pc) {
+            pc.close();
+        }
     }, 500);
 };
 
 window.onbeforeunload = function (e) {
-        setTimeout(() => {
-                pc.close();
-            }, 500);
-        e = e || window.event
-        // 兼容IE8和Firefox 4之前的版本
-        if (e) {
-          e.returnValue = '关闭提示'
+    // 在页面即将卸载时销毁会话
+    // 使用 sendBeacon 确保请求发送
+    if (sessionId && destroyUrl) {
+        console.log('[Unload] Sending destroy request via sendBeacon');
+        navigator.sendBeacon(destroyUrl, JSON.stringify({}));
+        sessionId = null;
+        destroyUrl = null;
+    }
+
+    setTimeout(() => {
+        if (pc) {
+            pc.close();
         }
-        // Chrome, Safari, Firefox 4+, Opera 12+ , IE 9+
-        return '关闭提示'
-      }
+    }, 500);
+
+    e = e || window.event
+    // 兼容IE8和Firefox 4之前的版本
+    if (e) {
+      e.returnValue = '关闭提示'
+    }
+    // Chrome, Safari, Firefox 4+, Opera 12+ , IE 9+
+    return '关闭提示'
+}

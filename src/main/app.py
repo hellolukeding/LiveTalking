@@ -89,6 +89,33 @@ avatar = None
 pcs = set()
 webrtc_players: Dict[int, HumanPlayer] = {}  # sessionid:HumanPlayer
 
+# ========== 安全修复：频率限制器和会话锁 ==========
+import time
+from collections import defaultdict
+
+class RateLimiter:
+    """简单的频率限制器，防止 DoS 攻击"""
+    def __init__(self, max_requests=60, window=60):
+        self.max_requests = max_requests  # 时间窗口内最多请求数
+        self.window = window  # 时间窗口（秒）
+        self.requests = defaultdict(list)  # 每个客户端的请求记录
+
+    def is_allowed(self, client_id):
+        now = time.time()
+        # 清理过期请求
+        self.requests[client_id] = [
+            req_time for req_time in self.requests[client_id]
+            if now - req_time < self.window
+        ]
+        if len(self.requests[client_id]) >= self.max_requests:
+            return False
+        self.requests[client_id].append(now)
+        return True
+
+# 全局频率限制器和会话锁（在应用启动后初始化）
+rate_limiter = None
+nerfreals_lock = None
+
 
 def randN(N) -> int:
     '''生成长度为 N的随机数 '''
@@ -208,22 +235,32 @@ async def offer(request):
         logger.debug(
             f"[OFFER] Created RTCSessionDescription: type={params['type']}")
 
-        # Check session limit
-        if len(nerfreals) >= opt.max_session:
-            logger.warning(
-                f"[OFFER] Max session limit reached: {len(nerfreals)} >= {opt.max_session}")
-            return web.Response(
-                content_type="application/json",
-                text=json.dumps({"code": -1, "msg": "reach max session"}),
-                status=429
-            )
+        # Check session limit with lock to prevent race conditions
+        async with nerfreals_lock:
+            if len(nerfreals) >= opt.max_session:
+                logger.warning(
+                    f"[OFFER] Max session limit reached: {len(nerfreals)} >= {opt.max_session}")
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({"code": -1, "msg": "reach max session"}),
+                    status=429
+                )
 
         sessionid = randN(6)
         logger.debug(f"[OFFER] Generating session ID: {sessionid}")
 
         # Initialize session with error handling
         try:
-            nerfreals[sessionid] = None
+            # Reserve session slot with lock
+            async with nerfreals_lock:
+                if len(nerfreals) >= opt.max_session:
+                    return web.Response(
+                        content_type="application/json",
+                        text=json.dumps({"code": -1, "msg": "reach max session"}),
+                        status=429
+                    )
+                nerfreals[sessionid] = None
+
             logger.debug(f"[OFFER] Building nerfreal for session {sessionid}")
 
             # Build nerfreal in executor to avoid blocking
@@ -232,14 +269,17 @@ async def offer(request):
             if nerfreal is None:
                 raise RuntimeError("Failed to build nerfreal instance")
 
-            nerfreals[sessionid] = nerfreal
+            # Update nerfreal with lock
+            async with nerfreals_lock:
+                nerfreals[sessionid] = nerfreal
             logger.debug(
                 f"[OFFER] Nerfreal built successfully for session {sessionid}")
 
         except Exception as e:
             logger.error(f"[OFFER] Failed to build nerfreal: {str(e)}")
-            if sessionid in nerfreals:
-                del nerfreals[sessionid]
+            async with nerfreals_lock:
+                if sessionid in nerfreals:
+                    del nerfreals[sessionid]
             return web.Response(
                 content_type="application/json",
                 text=json.dumps(
@@ -596,14 +636,31 @@ async def human(request):
                 status=400
             )
 
-        sessionid = params.get('sessionid', 0)
-        if not sessionid or sessionid not in nerfreals:
-            logger.error(f"[HUMAN] Invalid session ID: {sessionid}")
+        # 验证 sessionid 格式（防止注入攻击）
+        sessionid = params.get('sessionid')
+        if sessionid is None:
+            logger.error("[HUMAN] Missing sessionid in request")
             return web.Response(
                 content_type="application/json",
-                text=json.dumps(
-                    {"code": -1, "msg": f"Invalid or missing session ID: {sessionid}"}),
+                text=json.dumps({"code": -1, "msg": "Missing sessionid"}),
                 status=400
+            )
+
+        # 验证 sessionid 是整数且在有效范围内
+        if not isinstance(sessionid, int) or sessionid <= 0 or sessionid > 999999:
+            logger.error(f"[HUMAN] Invalid sessionid format: {sessionid}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid sessionid format"}),
+                status=400
+            )
+
+        if sessionid not in nerfreals:
+            logger.error(f"[HUMAN] Session not found: {sessionid}")
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Session not found"}),
+                status=404
             )
 
         # Check if nerfreal is properly initialized
@@ -719,7 +776,22 @@ async def interrupt_talk(request):
     try:
         params = await request.json()
 
-        sessionid = params.get('sessionid', 0)
+        # 验证 sessionid 格式
+        sessionid = params.get('sessionid')
+        if sessionid is None or not isinstance(sessionid, int) or sessionid <= 0 or sessionid > 999999:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid sessionid"}),
+                status=400
+            )
+
+        if sessionid not in nerfreals:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Session not found"}),
+                status=404
+            )
+
         nerfreals[sessionid].flush_talk()
 
         return web.Response(
@@ -741,7 +813,32 @@ async def interrupt_talk(request):
 async def humanaudio(request):
     try:
         form = await request.post()
-        sessionid = int(form.get('sessionid', 0))
+
+        # 验证 sessionid 格式
+        sessionid_str = form.get('sessionid', '0')
+        try:
+            sessionid = int(sessionid_str)
+        except (ValueError, TypeError):
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid sessionid"}),
+                status=400
+            )
+
+        if sessionid <= 0 or sessionid > 999999:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Invalid sessionid"}),
+                status=400
+            )
+
+        if sessionid not in nerfreals:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Session not found"}),
+                status=404
+            )
+
         fileobj = form["file"]
         filename = fileobj.filename
         filebytes = fileobj.file.read()
@@ -1304,6 +1401,12 @@ if __name__ == '__main__':
         rendthrd.start()
 
     #############################################################################
+    # 初始化安全组件
+    global rate_limiter, nerfreals_lock
+    rate_limiter = RateLimiter(max_requests=60, window=60)
+    nerfreals_lock = asyncio.Lock()
+    logger.info("[安全] 频率限制器和会话锁已初始化")
+
     appasync = web.Application(client_max_size=1024**2*100)
     appasync.on_shutdown.append(on_shutdown)
     appasync.router.add_post("/offer", offer)

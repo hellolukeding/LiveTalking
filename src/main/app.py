@@ -49,6 +49,7 @@ from threading import Event, Thread
 from typing import Dict
 
 import aiohttp
+import aiohttp_cors
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -353,7 +354,7 @@ def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
     import json
     meta_path = f"./data/avatars/{avatar_id}/meta.json"
     avatar_name = avatar_id  # 默认使用 avatar_id
-    voice_id = getattr(opt_copy, 'REF_FILE', 'zh_female_wenroushunshun_mars_bigtts')  # 默认语音
+    voice_id = getattr(opt_copy, 'REF_FILE', 'zh_female_xiaohe_uranus_bigtts')  # 默认语音（豆包模型2.0）
     try:
         with open(meta_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
@@ -1283,7 +1284,7 @@ async def avatar_create(request):
         avatar_id = None
         name = None
         tts_type = "doubao"  # 默认使用 doubao
-        voice_id = "zh_female_wenroushunshun_mars_bigtts"  # 默认语音
+        voice_id = "zh_female_xiaohe_uranus_bigtts"  # 默认语音（豆包模型2.0）
         video_path = None
 
         async for field in reader:
@@ -1619,7 +1620,7 @@ if __name__ == '__main__':
     parser.add_argument('--tts', type=str, default=os.getenv('TTS_TYPE', 'edgetts'),
                         help="tts service type (from env TTS_TYPE)")
     parser.add_argument('--REF_FILE', type=str, default="zh_female_xiaohe_uranus_bigtts",
-                        help="参考文件名或语音模型ID，对于豆包TTS使用voice_id，如zh_female_xiaohe_uranus_bigtts")
+                        help="参考文件名或语音模型ID，对于豆包TTS使用voice_id，如zh_female_xiaohe_uranus_bigtts（豆包模型2.0）")
     parser.add_argument('--REF_TEXT', type=str, default=None)
     # http://localhost:9000
     parser.add_argument('--TTS_SERVER', type=str,
@@ -1717,6 +1718,19 @@ if __name__ == '__main__':
     appasync.router.add_delete("/avatars/{avatar_id}", avatar_delete)
     appasync.router.add_post('/preview_voice', preview_voice_tts)
     # Avatar 静态资源（图片等）
+    # 配置 CORS (允许所有来源)
+    cors = aiohttp_cors.setup(appasync, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods="*",
+        )
+    })
+    # 在所有路由上配置CORS
+    for route in list(appasync.router.routes()):
+        cors.add(route)
+
     appasync.router.add_static("/avatars/", path="data/avatars", name="avatar_static")
 
 

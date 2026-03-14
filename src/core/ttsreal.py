@@ -761,8 +761,13 @@ class DoubaoWebSocketConnection:
         self.lock = threading.Lock()
 
     def _get_resource_id(self) -> str:
-        """获取资源ID - 直接使用配置的resource_id"""
+        """获取资源ID - 根据音色ID自动匹配正确的resource_id"""
         if self.resource_id:
+            # 检查是否是 BV 开头的标准音色
+            if self.voice_id.startswith('BV'):
+                # 对于标准音色，不使用自定义 resource_id，使用默认值
+                logger.warning(f"[DOUBAO_TTS] 检测到标准音色 {self.voice_id}，忽略配置的 resource_id={self.resource_id}，使用默认值")
+                return "volc.service_type.10029"
             return self.resource_id
         # 默认值
         return "volc.service_type.10029"

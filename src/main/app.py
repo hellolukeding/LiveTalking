@@ -1403,11 +1403,42 @@ async def preview_voice_tts(request):
             text=json.dumps({"code": -1, "msg": f"Preview failed: {str(e)}"}),
             status=500
         )
+async def on_startup(app):
+    """应用启动时初始化监控和清理"""
+    logger.info("[启动] 应用启动初始化...")
+    
+    # 异步启动监控任务（不阻塞启动）
+    async def start_monitor_later():
+        await asyncio.sleep(2)  # 等待应用完全启动
+        logger.info("[启动] 启动监控任务...")
+        asyncio.create_task(monitor_task())
+        logger.info("[启动] 监控任务已创建")
+    
+    asyncio.create_task(start_monitor_later())
+    logger.info("[启动] 启动初始化完成")
+
+
 async def on_shutdown(app):
+    """应用关闭时清理资源"""
+    logger.info("[SHUTDOWN] 应用关闭...")
+    
+    # 清理所有会话
+    for sessionid in list(nerfreals.keys()):
+        try:
+            if nerfreals[sessionid] is not None and hasattr(nerfreals[sessionid], 'stop_all_threads'):
+                nerfreals[sessionid].stop_all_threads()
+                logger.info(f"[SHUTDOWN] 已清理会话 {sessionid}")
+        except Exception as e:
+            logger.error(f"[SHUTDOWN] 清理会话 {sessionid} 失败: {e}")
+    
+    nerfreals.clear()
+    
     # 关闭对等连接
     coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros)
+    await asyncio.gather(*coros, return_exceptions=True)
     pcs.clear()
+    
+    logger.info("[SHUTDOWN] 应用关闭完成")
 
 
 async def post(url, data):
@@ -1605,6 +1636,7 @@ if __name__ == '__main__':
         client_max_size=1024**2*100,
         middlewares=[timeout_middleware_factory]  # 全局超时中间件
     )
+    appasync.on_startup.append(on_startup)
     appasync.on_shutdown.append(on_shutdown)
     appasync.router.add_post("/offer", offer)
     appasync.router.add_post("/human", human)
@@ -1676,10 +1708,6 @@ if __name__ == '__main__':
             except Exception as e:
                 logger.error(f"[监控] 监控任务异常: {e}")
     
-    # 启动监控任务
-    asyncio.create_task(monitor_task())
-    logger.info("[监控] 监控任务已启动")
-
     # 配置默认CORS设置
     cors = aiohttp_cors.setup(appasync, defaults={
         "*": aiohttp_cors.ResourceOptions(

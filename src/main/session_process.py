@@ -241,8 +241,8 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                 self.frame_type = frame_type
                 self.count = 0
 
-            def put(self, frame_data):
-                """同步写入方法 - basereal.py 直接调用这个"""
+            async def put(self, frame_data):
+                """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
                 try:
                     # frame_data 是 (frame, eventpoint) 元组
                     frame, eventpoint = frame_data if isinstance(frame_data, tuple) else (frame_data, None)
@@ -265,6 +265,8 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
                 except Exception as e:
                     logger.error(f"[Session-{session_id}] {self.frame_type}.put() error: {e}")
+                # 立即返回，不等待
+                return
 
         class FakeAudioTrack:
             """假的音频轨道 - _queue 是 DirectFrameWriter"""
@@ -304,6 +306,15 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
         # 发送就绪信号
         status_queue.put({"status": "ready"})
 
+        # 启动事件循环线程 - run_coroutine_threadsafe 需要 loop 正在运行
+        def run_event_loop():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+        
+        loop_thread = Thread(target=run_event_loop, daemon=True)
+        loop_thread.start()
+        logger.info(f"[Session-{session_id}] Event loop thread started")
+
         # 启动渲染线程
         render_thread = Thread(target=nerfreal.render, args=(quit_event, loop, fake_audio, fake_video))
         render_thread.daemon = True
@@ -332,6 +343,13 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
         if 'nerfreal' in locals():
             try:
                 nerfreal.stop_all_threads()
+            except:
+                pass
+
+        # 停止事件循环
+        if 'loop' in locals() and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
             except:
                 pass
 

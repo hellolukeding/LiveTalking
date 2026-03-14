@@ -1478,8 +1478,8 @@ async def on_startup(app):
     """应用启动时初始化监控和清理"""
     logger.info("[启动] 应用启动初始化...")
     
-    # 直接在后台启动监控任务
-    asyncio.create_task(monitor_task())
+    # 启动监控任务（使用 shield 保护，避免被取消）
+    task = asyncio.create_task(monitor_task())
     logger.info("[启动] 监控任务已创建")
 
 
@@ -1726,7 +1726,19 @@ if __name__ == '__main__':
     appasync.router.add_static('/', path='frontend/web')
 
     # ========== 启动监控任务 ==========
+    # 在服务器启动后启动监控（确保事件循环运行）
     def run_server(runner):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def start_monitor_after_setup():
+            await runner.setup()
+            await asyncio.sleep(3)  # 等待服务器完全启动
+            logger.info("[启动] 启动监控任务...")
+            asyncio.create_task(monitor_task())
+            logger.info("[启动] 监控任务已创建")
+        
+        loop.run_until_complete(start_monitor_after_setup())
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(runner.setup())

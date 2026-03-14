@@ -346,7 +346,7 @@ class BaseReal:
         self.send_custom_msg(msg)
 
     def put_audio_frame(self, audio_chunk, datainfo: dict = {}):  # 16khz 20ms pcm
-        """音频帧转发 - 简化版"""
+        """音频帧转发给 ASR（口型驱动）"""
         self._last_audio_in_time = time.perf_counter()
         
         # 🔇 回声消除：TTS播放时不处理ASR，防止数字人听到自己的声音
@@ -363,61 +363,6 @@ class BaseReal:
                     self.lip_asr.put_audio_frame(audio_chunk, datainfo)
                 except Exception:
                     pass
-
-        # 转发给WebRTC
-        try:
-            if not isinstance(audio_chunk, np.ndarray):
-                return
-
-            # 简单直接的转换
-            frame = np.clip(audio_chunk * 32767, -32768,
-                            32767).astype(np.int16)
-
-            # Use configured chunk/sample size instead of hard-coded 320
-            expected_samples = getattr(self, 'chunk', 320)
-            if len(frame) < expected_samples:
-                padded = np.zeros(expected_samples, dtype=np.int16)
-                padded[:len(frame)] = frame
-                frame = padded
-            elif len(frame) > expected_samples:
-                frame = frame[:expected_samples]
-
-            frame_2d = frame.reshape(1, -1)
-            new_frame = AudioFrame.from_ndarray(
-                frame_2d, layout='mono', format='s16')
-            new_frame.sample_rate = getattr(self, 'sample_rate', 16000)
-
-            if not (hasattr(self, 'audio_track') and self.audio_track):
-                with self._pending_audio_lock:
-                    self._pending_audio.append((new_frame, datainfo))
-                return
-
-            # 先 flush pending 帧
-            if self._pending_audio:
-                self._flush_pending_audio()
-
-            # If A/V sync delay is enabled, enqueue into delayed buffer.
-            if self._audio_out_delay_s > 0:
-                self._enqueue_audio_out(new_frame, datainfo)
-            else:
-                if hasattr(self, 'loop') and self.loop and self.loop.is_running():
-                    # 🆕 修复：使用阻塞式 put，让 TTS 自动减速匹配播放速度
-                    # 不再丢弃帧，而是等待队列有空间
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            self.audio_track._queue.put((new_frame, datainfo)),
-                            self.loop
-                        ).result(timeout=5.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"[AUDIO] 音频队列满，等待超时 5 秒")
-                    except Exception as e:
-                        logger.debug(f"[AUDIO] 帧放入异常: {e}")
-                else:
-                    with self._pending_audio_lock:
-                        self._pending_audio.append((new_frame, datainfo))
-
-        except Exception as e:
-            logger.error(f"[BASE_REAL] Audio error: {e}")
 
     def _flush_pending_audio(self):
         """尝试把缓冲区中的帧 flush 到音轨队列中。"""
@@ -867,9 +812,23 @@ class BaseReal:
 
             self.record_video_data(combine_frame)
 
-            # 🆕 修复：移除process_frames中的音频处理逻辑
-            # 音频处理已经在put_audio_frame中完成，这里不需要重复处理
-            # 这避免了音频被处理两次导致的速度过快问题
+            # 🔄 音频处理：遍历 audio_frames 并发送到 WebRTC
+            for audio_frame in audio_frames:
+                frame, type, eventpoint = audio_frame
+                frame = (frame * 32767).astype(np.int16)
+
+                if self.opt.transport == 'virtualcam':
+                    audio_tmp.put(frame.tobytes())
+                else:  # webrtc
+                    new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
+                    new_frame.planes[0].update(frame.tobytes())
+                    new_frame.sample_rate = 16000
+                    if audio_track and audio_track._queue:
+                        loop.call_soon_threadsafe(
+                            audio_track._queue.put_nowait, (new_frame, eventpoint))
+                    else:
+                        logger.debug("[PROCESS_FRAMES] Audio track or queue is None!")
+                self.record_audio_data(frame)
 
             if self.opt.transport == 'virtualcam':
                 vircam.sleep_until_next_frame()

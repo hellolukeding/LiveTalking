@@ -7,12 +7,7 @@
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../dist",
-    "env": {
-      "VITE_API_HOST": "192.168.1.132",
-      "VITE_API_PORT": "8011",
-      "VITE_API_BASE_URL": "http://192.168.1.132:8011"
-    }
+    "frontendDist": "../dist"
   },
   "app": {
     "windows": [

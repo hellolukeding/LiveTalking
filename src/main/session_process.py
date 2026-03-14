@@ -11,6 +11,16 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+# 为子进程添加文件日志
+import os
+if os.getpid() != os.getppid():  # 如果是子进程
+    log_file = f"/tmp/session_{os.getpid()}.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logging.getLogger().addHandler(file_handler)
+    logging.getLogger().setLevel(logging.DEBUG)
+
 
 class SessionStatus(Enum):
     """会话状态"""
@@ -227,14 +237,41 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
         logger.info(f"[Session-{session_id}] LipReal initialized")
 
         # 创建假的音视频轨道，用于捕获输出
+        # 使用简化的 Queue 对象，其 put() 方法是一个真正的 async coroutine
+        class SimpleQueue:
+            """简单的异步队列，put() 方法返回真正的 coroutine"""
+            def __init__(self, thread_queue, name="Queue"):
+                self.thread_queue = thread_queue
+                self.name = name
+                self.count = 0
+
+            async def put(self, item):
+                """异步 put 方法 - 返回真正的 coroutine"""
+                try:
+                    self.thread_queue.put_nowait(item)
+                    self.count += 1
+                    if self.count % 50 == 0:
+                        logger.info(f"[Session-{session_id}] {self.name}: Put {self.count} items")
+                except Exception as e:
+                    logger.error(f"[Session-{session_id}] {self.name}.put() error: {e}")
+                # 必须 await 才能让 run_coroutine_threadsafe 正常工作
+                await asyncio.sleep(0)
+
         class FakeAudioTrack(MediaStreamTrack):
             kind = "audio"
-            
+
             def __init__(self, queue_ref):
                 super().__init__()
-                self.queue_ref = queue_ref
+                self.queue_ref = queue_ref  # ThreadQueue
+                # 创建一个独立的 queue 对象，其 put() 是真正的 async 方法
+                self._queue_obj = SimpleQueue(queue_ref, "AudioQueue")
                 self._stopped = False
-            
+
+            @property
+            def _queue(self):
+                # 返回独立的 queue 对象，而不是 self
+                return self._queue_obj
+
             async def recv(self):
                 if self._stopped:
                     raise StopIteration
@@ -250,12 +287,19 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
         class FakeVideoTrack(MediaStreamTrack):
             kind = "video"
-            
+
             def __init__(self, queue_ref):
                 super().__init__()
-                self.queue_ref = queue_ref
+                self.queue_ref = queue_ref  # ThreadQueue
+                # 创建一个独立的 queue 对象，其 put() 是真正的 async 方法
+                self._queue_obj = SimpleQueue(queue_ref, "VideoQueue")
                 self._stopped = False
-            
+
+            @property
+            def _queue(self):
+                # 返回独立的 queue 对象，而不是 self
+                return self._queue_obj
+
             async def recv(self):
                 if self._stopped:
                     raise StopIteration
@@ -291,45 +335,59 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
         def frame_forwarder():
             last_audio_time = time.time()
             last_video_time = time.time()
-            
+            audio_forwarded = 0
+            video_forwarded = 0
+
             while not quit_event.is_set():
                 try:
-                    # 转发音频帧
+                    # 转发音频帧 - basereal.py puts (AudioFrame, eventpoint) tuples
                     try:
-                        audio_frame = audio_frame_queue.get(timeout=0.05)
-                        if audio_frame is not None:
-                            try:
-                                # 将 AudioFrame 转换为 bytes 以便序列化
-                                audio_bytes = {
-                                    'format': audio_frame.format.name,
-                                    'layout': audio_frame.layout.name,
-                                    'samples': audio_frame.samples,
-                                    'planes': [plane.to_bytes() for plane in audio_frame.planes]
-                                }
-                                audio_queue.put(audio_bytes, block=False)
-                                last_audio_time = time.time()
-                            except:
-                                pass
+                        audio_tuple = audio_frame_queue.get(timeout=0.05)
+                        if audio_tuple is not None:
+                            # 解包元组: (AudioFrame, eventpoint)
+                            audio_frame, eventpoint = audio_tuple if isinstance(audio_tuple, tuple) else (audio_tuple, None)
+                            if audio_frame is not None:
+                                try:
+                                    # 将 AudioFrame 转换为可序列化的字典
+                                    audio_bytes = {
+                                        'format': audio_frame.format.name,
+                                        'layout': audio_frame.layout.name,
+                                        'samples': audio_frame.samples,
+                                        'planes': [plane.to_bytes() for plane in audio_frame.planes]
+                                    }
+                                    audio_queue.put(audio_bytes, block=False)
+                                    last_audio_time = time.time()
+                                    audio_forwarded += 1
+                                    if audio_forwarded % 100 == 0:
+                                        logger.info(f"[Session-{session_id}] Forwarded {audio_forwarded} audio frames")
+                                except Exception as e:
+                                    logger.debug(f"[Session-{session_id}] Audio frame error: {e}")
                     except:
                         pass
 
-                    # 转发视频帧  
+                    # 转发视频帧 - basereal.py puts (VideoFrame, eventpoint) tuples
                     try:
-                        video_frame = video_frame_queue.get(timeout=0.05)
-                        if video_frame is not None:
-                            try:
-                                # 将 VideoFrame 转换为 bytes 以便序列化
-                                height, width = video_frame.height, video_frame.width
-                                video_bytes = {
-                                    'format': video_frame.format.name,
-                                    'width': width,
-                                    'height': height,
-                                    'data': video_frame.to_bytes()
-                                }
-                                video_queue.put(video_bytes, block=False)
-                                last_video_time = time.time()
-                            except:
-                                pass
+                        video_tuple = video_frame_queue.get(timeout=0.05)
+                        if video_tuple is not None:
+                            # 解包元组: (VideoFrame, eventpoint)
+                            video_frame, eventpoint = video_tuple if isinstance(video_tuple, tuple) else (video_tuple, None)
+                            if video_frame is not None:
+                                try:
+                                    # 将 VideoFrame 转换为可序列化的字典
+                                    height, width = video_frame.height, video_frame.width
+                                    video_bytes = {
+                                        'format': video_frame.format.name,
+                                        'width': width,
+                                        'height': height,
+                                        'data': video_frame.to_bytes()
+                                    }
+                                    video_queue.put(video_bytes, block=False)
+                                    last_video_time = time.time()
+                                    video_forwarded += 1
+                                    if video_forwarded % 50 == 0:
+                                        logger.info(f"[Session-{session_id}] Forwarded {video_forwarded} video frames")
+                                except Exception as e:
+                                    logger.debug(f"[Session-{session_id}] Video frame error: {e}")
                     except:
                         pass
 
@@ -403,21 +461,23 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
 def build_nerfreal_subprocess(session_id: str, avatar_id: str, opt: Any):
     """在子进程中构建 LipReal 实例"""
+    # 添加 sessionid 到 opt
+    opt.sessionid = session_id
     from core.lipreal import LipReal, load_model, load_avatar
 
     # 加载模型（全局单例，只加载一次）
     if not hasattr(build_nerfreal_subprocess, '_model'):
-        model_path = f"./models/wav2lip{opt.W if hasattr(opt, 'W') else 384}.pth"
+        model_path = "./models/wav2lip384.pth"
         build_nerfreal_subprocess._model = load_model(model_path)
         logger.info(f"[Session-{session_id}] Model loaded")
 
     model = build_nerfreal_subprocess._model
 
-    # 加载 avatar
-    avatar = load_avatar(avatar_id)
+    # 加载 avatar (load_avatar 返回 4 个值，只传前 3 个给 LipReal)
+    frame_list, face_list, coord_list, _ = load_avatar(avatar_id)
     logger.info(f"[Session-{session_id}] Avatar loaded: {avatar_id}")
 
     # 创建 LipReal 实例
-    nerfreal = LipReal(opt, model, avatar)
+    nerfreal = LipReal(opt, model, (frame_list, face_list, coord_list))
 
     return nerfreal

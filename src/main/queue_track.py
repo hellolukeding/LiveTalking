@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class QueueAudioTrack(MediaStreamTrack):
     """从队列读取音频的 WebRTC 轨道 - 支持序列化数据"""
+    kind = "audio"
 
     def __init__(self, queue: multiprocessing.Queue, session_id: str):
         super().__init__()
@@ -79,6 +80,7 @@ class QueueAudioTrack(MediaStreamTrack):
 
 class QueueVideoTrack(MediaStreamTrack):
     """从队列读取视频的 WebRTC 轨道 - 支持序列化数据"""
+    kind = "video"
 
     def __init__(self, queue: multiprocessing.Queue, session_id: str):
         super().__init__()

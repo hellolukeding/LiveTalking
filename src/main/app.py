@@ -728,20 +728,25 @@ async def offer(request):
                 audio_track = QueueAudioTrack(session.audio_queue, sessionid)
                 video_track = QueueVideoTrack(session.video_queue, sessionid)
                 
+                # 添加轨道到 peer connection
+                audio_sender = pc.addTrack(audio_track)
+                video_sender = pc.addTrack(video_track)
+                
                 # 创建简化的 player（只保存引用）
                 player = type("Player", (), {
                     "audio": audio_track,
                     "video": video_track,
                     "session": session
                 })()
+                webrtc_players[sessionid] = player
             else:
                 # 使用原有模式：直接访问 nerfreal
-            player = HumanPlayer(nerfreals[sessionid])
-            webrtc_players[sessionid] = player  # Store player reference for cleanup
-            audio_sender = pc.addTrack(player.audio)
-            video_sender = pc.addTrack(player.video)
-            logger.debug(
-                f"[OFFER] Media tracks created successfully for session {sessionid}")
+                player = HumanPlayer(nerfreals[sessionid])
+                webrtc_players[sessionid] = player  # Store player reference for cleanup
+                audio_sender = pc.addTrack(player.audio)
+                video_sender = pc.addTrack(player.video)
+                logger.debug(
+                    f"[OFFER] Media tracks created successfully for session {sessionid}")
 
         except Exception as e:
             logger.error(f"[OFFER] Failed to create media tracks: {str(e)}")
@@ -1758,7 +1763,6 @@ if __name__ == '__main__':
             logger.error(f"模型文件不存在: {model_path}")
             sys.exit(1)
         model = load_model(model_path)
-    appasync.router.add_post("/api/session/{session_id}/destroy", destroy_session)
         avatar = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size, model, 384)
     elif opt.model == 'ultralight':

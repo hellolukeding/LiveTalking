@@ -18,7 +18,7 @@ function App() {
     <BrowserRouter>
       <main className="w-screen h-screen bg-gray-800">
         <Routes>
-          <Route path="/" element={<VideoChat />} />
+          <Route path="/" element={<AvatarListPage />} />
           <Route path="/videochat" element={<VideoChat />} />
           <Route path="/avatars" element={<AvatarListPage />} />
           <Route path="/avatars/create" element={<AvatarCreatePage />} />

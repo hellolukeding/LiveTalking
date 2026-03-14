@@ -182,7 +182,8 @@ export default function AvatarListPage() {
             type="text"
             icon={<VideoCameraOutlined />}
             onClick={() => navigate('/')}
-            style={{ color: '#666', fontSize: 14 }}
+            style={{ color: '#666', fontSize: 14, display: "none" }}
+
           >
             返回对话
           </Button>

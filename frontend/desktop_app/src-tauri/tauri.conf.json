@@ -37,6 +37,7 @@
       "entitlements": "Entitlements.plist",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "此应用需要麦克风权限来进行语音识别",
+        "NSCameraUsageDescription": "此应用需要摄像头权限进行视频通话",
         "NSSpeechRecognitionUsageDescription": "此应用需要语音识别权限"
       }
     },
@@ -45,7 +46,11 @@
         "language": "zh-CN"
       },
       "nsis": {
-        "languages": ["SimpChinese"]
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
       }
     }
   }

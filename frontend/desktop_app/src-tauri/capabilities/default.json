@@ -1,11 +1,40 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window with media device access",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
     "opener:default",
-    "http:default"
+    "http:default",
+    "http:allow-fetch",
+    "http:allow-fetch-cancel",
+    "http:allow-fetch-read-body",
+    "http:allow-fetch-send",
+    {
+      "identifier": "allow-http-request-to-backend",
+      "allow": [
+        {
+          "cmd": "http",
+          "scope": "http://localhost:*"
+        },
+        {
+          "cmd": "http",
+          "scope": "http://192.168.*:*"
+        },
+        {
+          "cmd": "http",
+          "scope": "https://localhost:*"
+        },
+        {
+          "cmd": "http",
+          "scope": "https://192.168.*:*"
+        }
+      ]
+    }
   ]
 }

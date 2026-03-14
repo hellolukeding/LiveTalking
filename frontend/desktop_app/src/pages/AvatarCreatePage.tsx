@@ -47,7 +47,6 @@ export default function AvatarCreatePage() {
   const blobUrlRef = useRef<string | null>(null);
   const [step, setStep] = useState<Step>('upload');
   const [progress, setProgress] = useState(0);
-  const [createdId, setCreatedId] = useState('');
 
   // Cleanup video preview URL on unmount
   useEffect(() => {
@@ -103,9 +102,8 @@ export default function AvatarCreatePage() {
 
       setProgress(40);
 
-      const result = await createAvatar(formData);
+      await createAvatar(formData);
       setProgress(100);
-      setCreatedId(result.avatar_id);
       setStep('done');
 
     } catch (e) {

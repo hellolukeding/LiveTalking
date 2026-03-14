@@ -9,32 +9,8 @@
     "core:window:allow-maximize",
     "core:window:allow-minimize",
     "core:window:allow-close",
-    "opener:default",
-    "http:default",
-    "http:allow-fetch",
-    "http:allow-fetch-cancel",
-    "http:allow-fetch-read-body",
-    "http:allow-fetch-send",
-    {
-      "identifier": "allow-http-request-to-backend",
-      "allow": [
-        {
-          "cmd": "http",
-          "scope": "http://localhost:*"
-        },
-        {
-          "cmd": "http",
-          "scope": "http://192.168.*:*"
-        },
-        {
-          "cmd": "http",
-          "scope": "https://localhost:*"
-        },
-        {
-          "cmd": "http",
-          "scope": "https://192.168.*:*"
-        }
-      ]
-    }
+    "core:window:allow-center",
+    "core:window:allow-set-size",
+    "opener:default"
   ]
 }

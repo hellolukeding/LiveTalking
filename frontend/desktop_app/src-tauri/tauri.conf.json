@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.lukeding.livetalking-pc",
   "build": {
-    "beforeDevCommand": "yarn dev",
+    "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "yarn build",
+    "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -15,8 +15,7 @@
         "title": "livetalking-pc",
         "width": 1280,
         "height": 960,
-        "dragDropEnabled": true,
-        "fileDropEnabled": false
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -35,11 +34,7 @@
     ],
     "macOS": {
       "entitlements": "Entitlements.plist",
-      "infoPlist": {
-        "NSMicrophoneUsageDescription": "此应用需要麦克风权限来进行语音识别",
-        "NSCameraUsageDescription": "此应用需要摄像头权限进行视频通话",
-        "NSSpeechRecognitionUsageDescription": "此应用需要语音识别权限"
-      }
+      "infoPlist": "Info.plist"
     },
     "windows": {
       "wix": {

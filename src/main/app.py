@@ -49,7 +49,6 @@ from threading import Event, Thread
 from typing import Dict
 
 import aiohttp
-import aiohttp_cors
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -298,17 +297,6 @@ async def monitor_task():
         except Exception as e:
             logger.error(f"[监控] 监控任务异常: {e}")
     
-    # 配置默认CORS设置
-    cors = aiohttp_cors.setup(appasync, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-        )
-    })
-    # 在所有路由上配置CORS
-    for route in list(appasync.router.routes()):
-        cors.add(route)
 
     pagename = 'webrtcapi.html'
     if opt.transport == 'rtmp':

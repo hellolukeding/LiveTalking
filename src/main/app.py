@@ -66,6 +66,9 @@ from basereal import BaseReal
 from llm import llm_response
 from logger import logger
 from webrtc import HumanPlayer
+# 进程隔离相关导入
+from session_manager import SessionManager
+from queue_track import QueueAudioTrack, QueueVideoTrack
 from services.avatar_manager import (
     list_avatars, get_avatar, update_avatar, delete_avatar,
     generate_avatar_async
@@ -82,6 +85,8 @@ load_dotenv()
 
 
 app = Flask(__name__)
+session_manager = SessionManager(max_sessions=10)  # 会话管理器
+logger.info("[APP] SessionManager initialized")
 # sockets = Sockets(app)
 nerfreals: Dict[int, BaseReal] = {}  # sessionid:BaseReal
 opt = None
@@ -1469,6 +1474,9 @@ async def on_startup(app):
     logger.info("[启动] 应用启动初始化...")
     
     # 存储监控任务引用到 app 对象，防止被垃圾回收
+    # 启动会话监控任务
+    asyncio.create_task(session_manager.start_monitor())
+    logger.info("[启动] 会话监控已启动")
     app['monitor_task'] = asyncio.create_task(monitor_task())
     logger.info("[启动] 监控任务已创建")
 
@@ -1495,6 +1503,10 @@ async def on_shutdown(app):
             logger.error(f"[SHUTDOWN] 清理会话 {sessionid} 失败: {e}")
     
     nerfreals.clear()
+
+    # 清理所有会话进程
+    await session_manager.destroy_all()
+    logger.info("[SHUTDOWN] 所有会话进程已清理")
     
     # 关闭对等连接
     coros = [pc.close() for pc in pcs]

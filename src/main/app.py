@@ -68,7 +68,7 @@ from logger import logger
 from webrtc import HumanPlayer
 # 进程隔离相关导入
 from session_manager import SessionManager
-from queue_track import QueueAudioTrack, QueueVideoTrack
+from queue_track import AVSyncClock, QueueAudioTrack, QueueVideoTrack
 from conversation_orchestrator import ConversationOrchestrator
 from services.avatar_manager import (
     list_avatars, get_avatar, update_avatar, delete_avatar,
@@ -807,8 +807,9 @@ async def offer(request):
             if USE_PROCESS_ISOLATION:
                 # 使用进程隔离模式：从队列读取
                 logger.debug(f"[OFFER] Using queue tracks for session {sessionid}")
-                audio_track = QueueAudioTrack(session.audio_queue, sessionid)
-                video_track = QueueVideoTrack(session.video_queue, sessionid)
+                av_clock = AVSyncClock()
+                audio_track = QueueAudioTrack(session.audio_queue, sessionid, clock=av_clock)
+                video_track = QueueVideoTrack(session.video_queue, sessionid, clock=av_clock)
                 
                 # 添加轨道到 peer connection
                 audio_sender = pc.addTrack(audio_track)

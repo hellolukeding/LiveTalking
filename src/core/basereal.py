@@ -448,6 +448,36 @@ class BaseReal:
         elif hasattr(self, 'lip_asr'):
             self.lip_asr.flush_talk()
 
+        # Best-effort: drain intermediate queues to avoid stale A/V frames after interrupt.
+        # Without this, old inference results can continue to be rendered and sent,
+        # which looks like "mouth not following current TTS".
+        try:
+            lip_asr = getattr(self, 'lip_asr', None)
+            if lip_asr is not None:
+                for qname in ("output_queue", "feat_queue"):
+                    q = getattr(lip_asr, qname, None)
+                    if q is None:
+                        continue
+                    for _ in range(5000):
+                        try:
+                            _v = q.get_nowait()
+                            del _v
+                        except Exception:
+                            break
+        except Exception:
+            pass
+        try:
+            resq = getattr(self, 'res_frame_queue', None)
+            if resq is not None:
+                for _ in range(5000):
+                    try:
+                        _v = resq.get_nowait()
+                        del _v
+                    except Exception:
+                        break
+        except Exception:
+            pass
+
     def is_speaking(self) -> bool:
         return self.speaking
 

@@ -65,10 +65,10 @@ class SessionProcess:
         try:
             # 创建队列
             self.command_queue = multiprocessing.Queue(maxsize=500)
-            # 音频帧更敏感：允许更大缓冲以吸收网络/调度抖动，避免丢帧导致卡顿
-            self.audio_queue = multiprocessing.Queue(maxsize=2000)
-            # 视频可丢：保持小队列避免积压（积压会导致延迟和CPU/内存压力）
+            # 严格口型同步：音频/视频队列必须保持同一时间尺度，避免“音频积压/视频丢帧”导致 A/V 漂移
+            # video: 25fps -> 60帧≈2.4s；audio: 50fps -> 120帧≈2.4s
             self.video_queue = multiprocessing.Queue(maxsize=60)
+            self.audio_queue = multiprocessing.Queue(maxsize=120)
             self.status_queue = multiprocessing.Queue(maxsize=10)
             self.speaking_value = multiprocessing.Value('b', False)
 
@@ -256,11 +256,15 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
         class DirectFrameWriter:
             """直接帧写入器 - 将帧序列化并写入 multiprocessing.Queue"""
-            def __init__(self, mp_queue, frame_type):
+            def __init__(self, mp_queue, frame_type, paired_audio_queue=None, paired_video_queue=None):
                 self.mp_queue = mp_queue
                 self.frame_type = frame_type
+                self.paired_audio_queue = paired_audio_queue
+                self.paired_video_queue = paired_video_queue
                 self.count = 0
                 self.drop_count = 0
+                # Audio overflow dropping must keep A/V aligned (2 audio chunks per 1 video frame @ 25fps).
+                self._audio_overflow_drops = 0
 
             async def put(self, frame_data):
                 """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
@@ -278,19 +282,50 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                         serialized = serialize_video_frame(frame)
 
                     # 写入 multiprocessing.Queue
-                    # - audio：尽量不丢帧（宁可引入少量缓冲延迟）
-                    # - video：队列满时丢旧帧，保持“最新画面”
+                    # 严格口型同步策略：
+                    # - audio/video 都不允许无界积压（会造成 A/V 漂移）
+                    # - 队列满时丢“最旧”数据，让系统快速追上实时（保持低延迟 + 同步）
                     if self.frame_type == "audio":
-                        await asyncio.to_thread(self.mp_queue.put, serialized, True, 0.5)
-                    else:
                         try:
                             self.mp_queue.put(serialized, block=False)
                         except queue.Full:
                             try:
-                                _ = self.mp_queue.get_nowait()
-                                del _
+                                _old = self.mp_queue.get_nowait()
+                                del _old
                             except Exception:
                                 pass
+                            # If audio queue overflows, audio would "jump ahead" relative to video.
+                            # To keep strict lip-sync, also drop the corresponding oldest video frame
+                            # every 2 audio drops (2x20ms audio == 1x40ms video).
+                            self._audio_overflow_drops += 1
+                            if self.paired_video_queue is not None and self._audio_overflow_drops % 2 == 0:
+                                try:
+                                    _oldv = self.paired_video_queue.get_nowait()
+                                    del _oldv
+                                except Exception:
+                                    pass
+                            try:
+                                self.mp_queue.put(serialized, block=False)
+                            except Exception:
+                                self.drop_count += 1
+                    else:  # video
+                        try:
+                            self.mp_queue.put(serialized, block=False)
+                        except queue.Full:
+                            # Drop oldest video frame…
+                            try:
+                                _oldv = self.mp_queue.get_nowait()
+                                del _oldv
+                            except Exception:
+                                pass
+                            # …and drop corresponding oldest audio frames (2x20ms) to keep lip-sync aligned.
+                            if self.paired_audio_queue is not None:
+                                for _ in range(2):
+                                    try:
+                                        _olda = self.paired_audio_queue.get_nowait()
+                                        del _olda
+                                    except Exception:
+                                        break
                             try:
                                 self.mp_queue.put(serialized, block=False)
                             except Exception:
@@ -311,7 +346,7 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
             kind = "audio"
 
             def __init__(self, mp_queue):
-                self._queue = DirectFrameWriter(mp_queue, 'audio')
+                self._queue = DirectFrameWriter(mp_queue, 'audio', paired_video_queue=video_queue)
 
             async def recv(self):
                 raise StopIteration  # 这个方法不会被调用
@@ -321,7 +356,7 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
             kind = "video"
 
             def __init__(self, mp_queue):
-                self._queue = DirectFrameWriter(mp_queue, 'video')
+                self._queue = DirectFrameWriter(mp_queue, 'video', paired_audio_queue=audio_queue)
 
             async def recv(self):
                 raise StopIteration  # 这个方法不会被调用
@@ -380,6 +415,14 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                         try:
                             for _ in range(2000):
                                 _v = audio_queue.get_nowait()
+                                del _v
+                        except Exception:
+                            pass
+                        # Drain video too, otherwise the client may keep rendering old mouth frames
+                        # while new/cleared audio is playing (perceived as lip-sync broken).
+                        try:
+                            for _ in range(200):
+                                _v = video_queue.get_nowait()
                                 del _v
                         except Exception:
                             pass

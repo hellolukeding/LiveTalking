@@ -349,20 +349,17 @@ class BaseReal:
         """音频帧转发给 ASR（口型驱动）"""
         self._last_audio_in_time = time.perf_counter()
         
-        # 🔇 回声消除：TTS播放时不处理ASR，防止数字人听到自己的声音
-        # curr_state > 1 表示正在播放自定义音频（TTS）
-        if self.curr_state <= 1:  # 只在未播放TTS时处理ASR
-            # 转发给ASR（口型驱动）
-            if hasattr(self, 'asr'):
-                try:
-                    self.asr.put_audio_frame(audio_chunk, datainfo)
-                except Exception:
-                    pass
-            elif hasattr(self, 'lip_asr'):
-                try:
-                    self.lip_asr.put_audio_frame(audio_chunk, datainfo)
-                except Exception:
-                    pass
+        # 转发给ASR（口型驱动）
+        if hasattr(self, 'asr'):
+            try:
+                self.asr.put_audio_frame(audio_chunk, datainfo)
+            except Exception:
+                pass
+        elif hasattr(self, 'lip_asr'):
+            try:
+                self.lip_asr.put_audio_frame(audio_chunk, datainfo)
+            except Exception:
+                pass
 
     def _flush_pending_audio(self):
         """尝试把缓冲区中的帧 flush 到音轨队列中。"""
@@ -824,8 +821,8 @@ class BaseReal:
                     new_frame.planes[0].update(frame.tobytes())
                     new_frame.sample_rate = 16000
                     if audio_track and audio_track._queue:
-                        loop.call_soon_threadsafe(
-                            audio_track._queue.put_nowait, (new_frame, eventpoint))
+                        asyncio.run_coroutine_threadsafe(
+                            audio_track._queue.put((new_frame, eventpoint)), loop)
                     else:
                         logger.debug("[PROCESS_FRAMES] Audio track or queue is None!")
                 self.record_audio_data(frame)

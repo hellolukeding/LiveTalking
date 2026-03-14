@@ -175,7 +175,7 @@ async def timeout_middleware_factory(app, handler):
     async def middleware_handler(request):
         request_path = request.path
         request_method = request.method
-        
+
         # 为所有请求添加全局超时保护
         try:
             async with timeout_context(GLOBAL_REQUEST_TIMEOUT, f"{request_method} {request_path}"):

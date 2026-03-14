@@ -860,6 +860,36 @@ async def offer(request):
         )
 
 
+@app.route("/api/session/<session_id>/destroy", methods=["POST"])
+async def destroy_session(request):
+    """主动销毁指定会话"""
+    session_id = request.match_info["session_id"]
+
+    logger.info(f"[DESTROY] Destroy request for session {session_id}")
+
+    # 检查会话是否存在
+    if not session_manager.has_session(session_id):
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": "Session not found"}),
+            status=404
+        )
+
+    # 销毁会话
+    success = await session_manager.destroy_session(session_id)
+
+    if success:
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": 0, "msg": "Session destroyed"})
+        )
+    else:
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": "Failed to destroy session"}),
+            status=500
+        )
+
 async def human(request):
     try:
         params = await safe_request_json(request)
@@ -1685,6 +1715,7 @@ if __name__ == '__main__':
             logger.error(f"模型文件不存在: {model_path}")
             sys.exit(1)
         model = load_model(model_path)
+    appasync.router.add_post("/api/session/{session_id}/destroy", destroy_session)
         avatar = load_avatar(opt.avatar_id)
         warm_up(opt.batch_size, model, 384)
     elif opt.model == 'ultralight':

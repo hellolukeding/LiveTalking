@@ -208,7 +208,6 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
     import time
     import numpy as np
     from threading import Event, Thread
-    from queue import Queue as ThreadQueue
     from av import AudioFrame, VideoFrame
 
     # 设置进程名称
@@ -221,8 +220,6 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
     logger.info(f"[Session-{session_id}] Process started (pid={os.getpid()})")
 
     quit_event = Event()
-    audio_frame_queue = ThreadQueue(maxsize=100)
-    video_frame_queue = ThreadQueue(maxsize=100)
 
     try:
         # 导入必要的模块（在子进程中）
@@ -234,86 +231,69 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
         nerfreal = build_nerfreal_subprocess(session_id, avatar_id, opt)
         nerfreal.sessionid = session_id
 
-        logger.info(f"[Session-{session_id}] LipReal initialized")
+        # 创建直接队列写入器 - basereal.py 调用 _queue.put() 时直接序列化并写入 mp.Queue
+        from frame_serializer import serialize_audio_frame, serialize_video_frame
 
-        # 创建假的音视频轨道，用于捕获输出
-        # 使用简化的 Queue 对象，其 put() 方法是一个真正的 async coroutine
-        class SimpleQueue:
-            """简单的异步队列，put() 方法返回真正的 coroutine"""
-            def __init__(self, thread_queue, name="Queue"):
-                self.thread_queue = thread_queue
-                self.name = name
+        class DirectFrameWriter:
+            """直接帧写入器 - 将帧序列化并写入 multiprocessing.Queue"""
+            def __init__(self, mp_queue, frame_type):
+                self.mp_queue = mp_queue
+                self.frame_type = frame_type
                 self.count = 0
 
-            async def put(self, item):
-                """异步 put 方法 - 返回真正的 coroutine"""
+            def put(self, frame_data):
+                """同步写入方法 - basereal.py 直接调用这个"""
                 try:
-                    self.thread_queue.put_nowait(item)
+                    # frame_data 是 (frame, eventpoint) 元组
+                    frame, eventpoint = frame_data if isinstance(frame_data, tuple) else (frame_data, None)
+
+                    if frame is None:
+                        return
+
+                    # 序列化帧
+                    if self.frame_type == 'audio':
+                        serialized = serialize_audio_frame(frame)
+                    else:
+                        serialized = serialize_video_frame(frame)
+
+                    # 写入 multiprocessing.Queue
+                    self.mp_queue.put(serialized, block=False)
+
                     self.count += 1
                     if self.count % 50 == 0:
-                        logger.info(f"[Session-{session_id}] {self.name}: Put {self.count} items")
-                except Exception as e:
-                    logger.error(f"[Session-{session_id}] {self.name}.put() error: {e}")
-                # 必须 await 才能让 run_coroutine_threadsafe 正常工作
-                await asyncio.sleep(0)
+                        logger.info(f"[Session-{session_id}] {self.frame_type}: Put {self.count} frames")
 
-        class FakeAudioTrack(MediaStreamTrack):
+                except Exception as e:
+                    logger.error(f"[Session-{session_id}] {self.frame_type}.put() error: {e}")
+
+        class FakeAudioTrack:
+            """假的音频轨道 - _queue 是 DirectFrameWriter"""
             kind = "audio"
 
-            def __init__(self, queue_ref):
-                super().__init__()
-                self.queue_ref = queue_ref  # ThreadQueue
-                # 创建一个独立的 queue 对象，其 put() 是真正的 async 方法
-                self._queue_obj = SimpleQueue(queue_ref, "AudioQueue")
-                self._stopped = False
-
-            @property
-            def _queue(self):
-                # 返回独立的 queue 对象，而不是 self
-                return self._queue_obj
+            def __init__(self, mp_queue):
+                self._queue = DirectFrameWriter(mp_queue, 'audio')
 
             async def recv(self):
-                if self._stopped:
-                    raise StopIteration
-                try:
-                    frame = self.queue_ref.get(timeout=0.1)
-                    if frame is None:
-                        self._stopped = True
-                        raise StopIteration
-                    return frame
-                except:
-                    # 返回静音帧
-                    return AudioFrame(format='s16', layout='mono', samples=960)
+                raise StopIteration  # 这个方法不会被调用
 
-        class FakeVideoTrack(MediaStreamTrack):
+        class FakeVideoTrack:
+            """假的视频轨道 - _queue 是 DirectFrameWriter"""
             kind = "video"
 
-            def __init__(self, queue_ref):
-                super().__init__()
-                self.queue_ref = queue_ref  # ThreadQueue
-                # 创建一个独立的 queue 对象，其 put() 是真正的 async 方法
-                self._queue_obj = SimpleQueue(queue_ref, "VideoQueue")
-                self._stopped = False
-
-            @property
-            def _queue(self):
-                # 返回独立的 queue 对象，而不是 self
-                return self._queue_obj
+            def __init__(self, mp_queue):
+                self._queue = DirectFrameWriter(mp_queue, 'video')
 
             async def recv(self):
-                if self._stopped:
-                    raise StopIteration
-                try:
-                    frame = self.queue_ref.get(timeout=0.1)
-                    if frame is None:
-                        self._stopped = True
-                        raise StopIteration
-                    return frame
-                except:
-                    raise StopIteration
+                raise StopIteration  # 这个方法不会被调用
 
-        fake_audio = FakeAudioTrack(audio_frame_queue)
-        fake_video = FakeVideoTrack(video_frame_queue)
+        logger.info(f"[Session-{session_id}] LipReal initialized")
+
+        # 不再需要 ThreadQueue 和 frame_forwarder
+        # 直接创建 FakeTrack，传递 multiprocessing.Queue
+        fake_audio = FakeAudioTrack(audio_queue)
+        fake_video = FakeVideoTrack(video_queue)
+
+        logger.info(f"[Session-{session_id}] Using direct frame writers")
 
         # 启动 LipReal 渲染（使用假的轨道）
         loop = asyncio.new_event_loop()
@@ -331,91 +311,6 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
         logger.info(f"[Session-{session_id}] Render thread started")
 
-        # 帧转发线程 - 从内部队列获取帧并发送到进程间队列
-        def frame_forwarder():
-            last_audio_time = time.time()
-            last_video_time = time.time()
-            audio_forwarded = 0
-            video_forwarded = 0
-
-            while not quit_event.is_set():
-                try:
-                    # 转发音频帧 - basereal.py puts (AudioFrame, eventpoint) tuples
-                    try:
-                        audio_tuple = audio_frame_queue.get(timeout=0.05)
-                        if audio_tuple is not None:
-                            # 解包元组: (AudioFrame, eventpoint)
-                            audio_frame, eventpoint = audio_tuple if isinstance(audio_tuple, tuple) else (audio_tuple, None)
-                            if audio_frame is not None:
-                                try:
-                                    # 将 AudioFrame 转换为可序列化的字典
-                                    audio_bytes = {
-                                        'format': audio_frame.format.name,
-                                        'layout': audio_frame.layout.name,
-                                        'samples': audio_frame.samples,
-                                        'planes': [plane.to_bytes() for plane in audio_frame.planes]
-                                    }
-                                    audio_queue.put(audio_bytes, block=False)
-                                    last_audio_time = time.time()
-                                    audio_forwarded += 1
-                                    if audio_forwarded % 100 == 0:
-                                        logger.info(f"[Session-{session_id}] Forwarded {audio_forwarded} audio frames")
-                                except Exception as e:
-                                    logger.debug(f"[Session-{session_id}] Audio frame error: {e}")
-                    except:
-                        pass
-
-                    # 转发视频帧 - basereal.py puts (VideoFrame, eventpoint) tuples
-                    try:
-                        video_tuple = video_frame_queue.get(timeout=0.05)
-                        if video_tuple is not None:
-                            # 解包元组: (VideoFrame, eventpoint)
-                            video_frame, eventpoint = video_tuple if isinstance(video_tuple, tuple) else (video_tuple, None)
-                            if video_frame is not None:
-                                try:
-                                    # 将 VideoFrame 转换为可序列化的字典
-                                    height, width = video_frame.height, video_frame.width
-                                    video_bytes = {
-                                        'format': video_frame.format.name,
-                                        'width': width,
-                                        'height': height,
-                                        'data': video_frame.to_bytes()
-                                    }
-                                    video_queue.put(video_bytes, block=False)
-                                    last_video_time = time.time()
-                                    video_forwarded += 1
-                                    if video_forwarded % 50 == 0:
-                                        logger.info(f"[Session-{session_id}] Forwarded {video_forwarded} video frames")
-                                except Exception as e:
-                                    logger.debug(f"[Session-{session_id}] Video frame error: {e}")
-                    except:
-                        pass
-
-                    # 检查停止命令
-                    try:
-                        cmd = command_queue.get(block=False)
-                        if cmd.get("action") == "stop":
-                            logger.info(f"[Session-{session_id}] Received stop command")
-                            quit_event.set()
-                            break
-                    except:
-                        pass
-
-                    # 检查超时
-                    if time.time() - last_audio_time > 5.0:
-                        # 发送心跳音频帧保持连接
-                        pass
-
-                    time.sleep(0.01)  # 避免CPU占用过高
-
-                except Exception as e:
-                    logger.error(f"[Session-{session_id}] Frame forwarder error: {e}")
-                    time.sleep(0.01)
-
-        forwarder_thread = Thread(target=frame_forwarder, daemon=True)
-        forwarder_thread.start()
-
-        logger.info(f"[Session-{session_id}] Frame forwarder started")
 
         # 等待渲染线程完成
         render_thread.join()

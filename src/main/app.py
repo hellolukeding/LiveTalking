@@ -250,52 +250,53 @@ async def safe_request_post(request, max_size=MAX_AUDIO_SIZE):
         raise
 
 
-    async def monitor_task():
-        """监控任务：检测异常状态并记录"""
-        while True:
-            try:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
+async def monitor_task():
+    """监控任务：检测异常状态并记录"""
+    while True:
+        try:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            logger.info("[监控] 监控任务运行中...")  # 添加心跳日志
+            
+            # 检查活跃请求数量
+            active_count = len(timeout_stats['active_requests'])
+            if active_count > 0:
+                logger.info(f"[监控] 活跃请求: {active_count}")
+            
+            # 检查超时统计
+            if timeout_stats['timeouts'] > 0:
+                logger.warning(f"[监控] 超时统计: 总计 {timeout_stats['timeouts']} 次")
+                if timeout_stats['last_timeout']:
+                    last = timeout_stats['last_timeout']
+                    logger.warning(f"[监控] 最后超时: {last}")
+            
+            # 检查会话状态
+            session_count = len(nerfreals)
+            if session_count > 0:
+                logger.info(f"[监控] 活跃会话: {session_count}")
                 
-                # 检查活跃请求数量
-                active_count = len(timeout_stats['active_requests'])
-                if active_count > 0:
-                    logger.info(f"[监控] 活跃请求: {active_count}")
+                # 检查是否有僵尸会话（会话存在但没有活动）
+                cleanup_count = 0
+                for sessionid in list(nerfreals.keys()):
+                    nerfreal = nerfreals[sessionid]
+                    if nerfreal is None:
+                        logger.warning(f"[监控] 发现僵尸会话: {sessionid} (None)")
+                        del nerfreals[sessionid]
+                        cleanup_count += 1
+                    elif not hasattr(nerfreal, 'datachannel') or nerfreal.datachannel is None:
+                        logger.warning(f"[监控] 发现僵尸会话: {sessionid} (无 datachannel)")
+                        try:
+                            if hasattr(nerfreal, 'stop_all_threads'):
+                                nerfreal.stop_all_threads()
+                        except:
+                            pass
+                        del nerfreals[sessionid]
+                        cleanup_count += 1
                 
-                # 检查超时统计
-                if timeout_stats['timeouts'] > 0:
-                    logger.warning(f"[监控] 超时统计: 总计 {timeout_stats['timeouts']} 次")
-                    if timeout_stats['last_timeout']:
-                        last = timeout_stats['last_timeout']
-                        logger.warning(f"[监控] 最后超时: {last}")
+                if cleanup_count > 0:
+                    logger.info(f"[监控] 已清理 {cleanup_count} 个僵尸会话")
                 
-                # 检查会话状态
-                session_count = len(nerfreals)
-                if session_count > 0:
-                    logger.info(f"[监控] 活跃会话: {session_count}")
-                    
-                    # 检查是否有僵尸会话（会话存在但没有活动）
-                    cleanup_count = 0
-                    for sessionid in list(nerfreals.keys()):
-                        nerfreal = nerfreals[sessionid]
-                        if nerfreal is None:
-                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (None)")
-                            del nerfreals[sessionid]
-                            cleanup_count += 1
-                        elif not hasattr(nerfreal, 'datachannel') or nerfreal.datachannel is None:
-                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (无 datachannel)")
-                            try:
-                                if hasattr(nerfreal, 'stop_all_threads'):
-                                    nerfreal.stop_all_threads()
-                            except:
-                                pass
-                            del nerfreals[sessionid]
-                            cleanup_count += 1
-                    
-                    if cleanup_count > 0:
-                        logger.info(f"[监控] 已清理 {cleanup_count} 个僵尸会话")
-                    
-            except Exception as e:
-                logger.error(f"[监控] 监控任务异常: {e}")
+        except Exception as e:
+            logger.error(f"[监控] 监控任务异常: {e}")
     
     # 配置默认CORS设置
     cors = aiohttp_cors.setup(appasync, defaults={
@@ -1475,17 +1476,25 @@ async def preview_voice_tts(request):
             status=500
         )
 async def on_startup(app):
-    """应用启动时初始化监控和清理"""
+    """应用启动时初始化"""
     logger.info("[启动] 应用启动初始化...")
     
-    # 启动监控任务（使用 shield 保护，避免被取消）
-    task = asyncio.create_task(monitor_task())
+    # 存储监控任务引用到 app 对象，防止被垃圾回收
+    app['monitor_task'] = asyncio.create_task(monitor_task())
     logger.info("[启动] 监控任务已创建")
 
 
 async def on_shutdown(app):
     """应用关闭时清理资源"""
     logger.info("[SHUTDOWN] 应用关闭...")
+    
+    # 取消监控任务
+    if 'monitor_task' in app and app['monitor_task'] and not app['monitor_task'].done():
+        app['monitor_task'].cancel()
+        try:
+            await app['monitor_task']
+        except asyncio.CancelledError:
+            logger.info("[SHUTDOWN] 监控任务已取消")
     
     # 清理所有会话
     for sessionid in list(nerfreals.keys()):
@@ -1726,19 +1735,8 @@ if __name__ == '__main__':
     appasync.router.add_static('/', path='frontend/web')
 
     # ========== 启动监控任务 ==========
-    # 在服务器启动后启动监控（确保事件循环运行）
+    # 监控任务通过 on_startup 处理器启动
     def run_server(runner):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def start_monitor_after_setup():
-            await runner.setup()
-            await asyncio.sleep(3)  # 等待服务器完全启动
-            logger.info("[启动] 启动监控任务...")
-            asyncio.create_task(monitor_task())
-            logger.info("[启动] 监控任务已创建")
-        
-        loop.run_until_complete(start_monitor_after_setup())
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(runner.setup())

@@ -47,12 +47,7 @@ jobs:
 
       - name: Install dependencies (frontend)
         working-directory: ./frontend/desktop_app
-        shell: pwsh
-        run: |
-          # Explicitly install correct Tauri versions
-          pnpm add -D @tauri-apps/cli@2.9.14
-          pnpm add @tauri-apps/api@2.9.1
-          pnpm install
+        run: pnpm install
 
       - name: Build frontend
         working-directory: ./frontend/desktop_app

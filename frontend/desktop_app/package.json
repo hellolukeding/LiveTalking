@@ -13,7 +13,7 @@
     "@ant-design/icons": "^6.1.0",
     "@ant-design/x": "^2.0.0",
     "@tailwindcss/vite": "^4.1.17",
-    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/api": "^2.10.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
     "@types/react-router-dom": "^5.3.3",
     "antd": "^6.0.0",
@@ -24,7 +24,7 @@
     "tailwindcss": "^4.1.17"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.9.0",
+    "@tauri-apps/cli": "^2.10.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",

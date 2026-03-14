@@ -64,9 +64,11 @@ class SessionProcess:
         """启动子进程"""
         try:
             # 创建队列
-            self.command_queue = multiprocessing.Queue(maxsize=100)
-            self.audio_queue = multiprocessing.Queue(maxsize=100)
-            self.video_queue = multiprocessing.Queue(maxsize=100)
+            self.command_queue = multiprocessing.Queue(maxsize=500)
+            # 音频帧更敏感：允许更大缓冲以吸收网络/调度抖动，避免丢帧导致卡顿
+            self.audio_queue = multiprocessing.Queue(maxsize=2000)
+            # 视频可丢：保持小队列避免积压（积压会导致延迟和CPU/内存压力）
+            self.video_queue = multiprocessing.Queue(maxsize=60)
             self.status_queue = multiprocessing.Queue(maxsize=10)
             self.speaking_value = multiprocessing.Value('b', False)
 
@@ -258,6 +260,7 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                 self.mp_queue = mp_queue
                 self.frame_type = frame_type
                 self.count = 0
+                self.drop_count = 0
 
             async def put(self, frame_data):
                 """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
@@ -275,11 +278,28 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                         serialized = serialize_video_frame(frame)
 
                     # 写入 multiprocessing.Queue
-                    self.mp_queue.put(serialized, block=False)
+                    # - audio：尽量不丢帧（宁可引入少量缓冲延迟）
+                    # - video：队列满时丢旧帧，保持“最新画面”
+                    if self.frame_type == "audio":
+                        await asyncio.to_thread(self.mp_queue.put, serialized, True, 0.5)
+                    else:
+                        try:
+                            self.mp_queue.put(serialized, block=False)
+                        except queue.Full:
+                            try:
+                                _ = self.mp_queue.get_nowait()
+                                del _
+                            except Exception:
+                                pass
+                            try:
+                                self.mp_queue.put(serialized, block=False)
+                            except Exception:
+                                self.drop_count += 1
 
                     self.count += 1
                     if self.count % 50 == 0:
-                        logger.info(f"[Session-{session_id}] {self.frame_type}: Put {self.count} frames")
+                        logger.info(
+                            f"[Session-{session_id}] {self.frame_type}: Put {self.count} frames (drop={self.drop_count})")
 
                 except Exception as e:
                     logger.error(f"[Session-{session_id}] {self.frame_type}.put() error: {e}")

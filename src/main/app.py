@@ -113,8 +113,7 @@ class RateLimiter:
         return True
 
 # 全局频率限制器和会话锁（在应用启动后初始化）
-rate_limiter = None
-nerfreals_lock = None
+# 注意：不在模块级别声明，直接在 main 函数中初始化
 
 
 def randN(N) -> int:

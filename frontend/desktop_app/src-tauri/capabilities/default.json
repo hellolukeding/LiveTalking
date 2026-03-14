@@ -12,13 +12,10 @@
     "core:window:allow-center",
     "core:window:allow-set-size",
     "opener:default",
-    "core:default",
     "core:webview:allow-webview-close",
-    "core:webview:allow-webview-create",
-    "core:webview:allow-webview-create-webview-window",
-    "core:webview:allow-webview-create-webview",
     "core:webview:allow-webview-position",
     "core:webview:allow-webview-size",
-    "core:webview:allow-webview-print"
+    "core:webview:allow-webview-show",
+    "core:webview:allow-webview-hide"
   ]
 }

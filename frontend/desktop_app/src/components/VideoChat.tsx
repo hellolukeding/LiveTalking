@@ -590,29 +590,49 @@ export default function VideoChat() {
 
         const dc = pc.createDataChannel("chat");
         dc.onmessage = (event) => {
-            const text = event.data;
-            if (text) {
-                // 每次收到AI消息时，标记AI正在说话
-                markAISpeaking();
+            const data = event.data;
+            if (!data) return;
 
-                setChatHistory(prev => {
-                    const lastMsg = prev[prev.length - 1];
-                    if (lastMsg && lastMsg.role === 'assistant') {
-                        const updated = [
-                            ...prev.slice(0, -1),
-                            { ...lastMsg, content: lastMsg.content + text }
-                        ];
-                        return updated;
-                    } else {
-                        const newMessage = {
-                            role: 'assistant' as const,
-                            content: text,
-                            timestamp: Date.now()
-                        };
-                        return [...prev, newMessage];
+            // 尝试解析为 JSON（处理 eventpoint 信号）
+            try {
+                const parsed = JSON.parse(data);
+                // TTS 完成信号
+                if (parsed.status === 'end') {
+                    console.log('[DataChannel] Received TTS end signal:', parsed);
+                    // 清除超时定时器并转换到 LISTENING 状态
+                    if (aiSpeakingTimeoutRef.current) {
+                        clearTimeout(aiSpeakingTimeoutRef.current);
+                        aiSpeakingTimeoutRef.current = null;
                     }
-                });
+                    setStateListening();
+                    return;
+                }
+            } catch {
+                // 不是 JSON，当作普通文本处理
             }
+
+            // 普通文本消息（AI回复）
+            const text = data;
+            // 每次收到AI消息时，标记AI正在说话
+            markAISpeaking();
+
+            setChatHistory(prev => {
+                const lastMsg = prev[prev.length - 1];
+                if (lastMsg && lastMsg.role === 'assistant') {
+                    const updated = [
+                        ...prev.slice(0, -1),
+                        { ...lastMsg, content: lastMsg.content + text }
+                    ];
+                    return updated;
+                } else {
+                    const newMessage = {
+                        role: 'assistant' as const,
+                        content: text,
+                        timestamp: Date.now()
+                    };
+                    return [...prev, newMessage];
+                }
+            });
         };
 
         pc.addEventListener('track', (evt) => {

@@ -17,6 +17,7 @@
 
 import asyncio
 import glob
+import json
 import math
 import os
 import queue
@@ -546,6 +547,10 @@ class BaseReal:
 
     def notify(self, eventpoint):
         logger.debug("notify:%s", eventpoint)
+        # 发送TTS完成信号到前端
+        if eventpoint:
+            msg = json.dumps(eventpoint)
+            self.send_custom_msg(msg)
 
     def start_recording(self):
         """开始录制视频"""

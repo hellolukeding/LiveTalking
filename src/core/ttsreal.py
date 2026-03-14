@@ -604,24 +604,42 @@ class DoubaoTTS(BaseTTS):
         logger.info(
             f"[DOUBAO_TTS] 初始化: appid={self.appid}, voice_id={self.voice_id}")
 
-        # WebSocket连接池 - seed-tts-1.0 违回24kHz，需要重采样到16kHz
+        # WebSocket连接池
+        # 重要：TTS 音频若不是 16kHz，需要重采样到 16kHz。
+        # - 小块频繁 resample / 频繁 np.concatenate 都会导致卡顿（CPU+内存拷贝）。
+        # - 这里保留可配置的 API 采样率，并对重采样做块级聚合，尽量降低开销。
+        try:
+            requested_sample_rate = int(os.getenv("DOUBAO_TTS_API_SAMPLE_RATE", "24000"))
+        except Exception:
+            requested_sample_rate = 24000
+        if requested_sample_rate not in (8000, 16000, 24000, 48000):
+            requested_sample_rate = 24000
+
         self.connection_pool = DoubaoConnectionPool(
             appid=self.appid,
             token=self.access_key,
             voice_id=self.voice_id,
             resource_id=self.resource_id,
-            sample_rate=24000,  # API返回24kHz
+            sample_rate=requested_sample_rate,
             max_connections=10  # 增加连接池大小，支持更多并发请求
         )
-        self.api_sample_rate = 24000  # 记录API采样率
+        self.api_sample_rate = requested_sample_rate  # 记录API采样率（若服务端不支持会导致重采样兜底）
 
         self.optimizer = None
         self._processing_lock = threading.Lock()
         logger.info("[DOUBAO_TTS] 初始化完成")
-        self.debug_wav = wave.open("debug_doubao_tts.wav", "wb")
-        self.debug_wav.setnchannels(1)
-        self.debug_wav.setsampwidth(2)
-        self.debug_wav.setframerate(self.sample_rate)
+        self.debug_wav = None
+        if os.getenv("DOUBAO_TTS_DEBUG_WAV", "0") == "1":
+            try:
+                path = os.getenv("DOUBAO_TTS_DEBUG_WAV_PATH") or f"/tmp/debug_doubao_tts_{getattr(opt, 'sessionid', 'session')}.wav"
+                self.debug_wav = wave.open(path, "wb")
+                self.debug_wav.setnchannels(1)
+                self.debug_wav.setsampwidth(2)
+                self.debug_wav.setframerate(self.sample_rate)
+                logger.info(f"[DOUBAO_TTS] Debug WAV enabled: {path}")
+            except Exception as e:
+                logger.warning(f"[DOUBAO_TTS] Failed to open debug wav: {e}")
+                self.debug_wav = None
 
     def _auto_integrate_optimizer(self):
         pass
@@ -649,11 +667,63 @@ class DoubaoTTS(BaseTTS):
 
                 # 简化的流式处理
                 chunk_size = self.chunk  # 320 = 20ms @ 16kHz
-                audio_buffer = np.array([], dtype=np.float32)
+                from collections import deque
+
+                class _FloatBuffer:
+                    def __init__(self):
+                        self._chunks = deque()
+                        self._size = 0
+
+                    def push(self, arr: np.ndarray):
+                        if arr is None:
+                            return
+                        if not isinstance(arr, np.ndarray):
+                            arr = np.asarray(arr, dtype=np.float32)
+                        if arr.dtype != np.float32:
+                            arr = arr.astype(np.float32, copy=False)
+                        if arr.size <= 0:
+                            return
+                        self._chunks.append(arr)
+                        self._size += int(arr.size)
+
+                    def __len__(self):
+                        return self._size
+
+                    def pop(self, n: int) -> Optional[np.ndarray]:
+                        if self._size < n:
+                            return None
+                        out = np.empty(n, dtype=np.float32)
+                        pos = 0
+                        while pos < n:
+                            a = self._chunks[0]
+                            take = min(a.size, n - pos)
+                            out[pos:pos + take] = a[:take]
+                            if take == a.size:
+                                self._chunks.popleft()
+                            else:
+                                self._chunks[0] = a[take:]
+                            pos += take
+                        self._size -= n
+                        return out
+
+                audio_buffer = _FloatBuffer()      # 16kHz float32
+                api_rate_buffer = _FloatBuffer()   # api_sample_rate float32
                 leftover_bytes = b''
                 first_chunk = True
                 total_sent = 0
                 start_time = None
+                # For resampling, process in blocks to reduce overhead.
+                api_sr = int(getattr(self, "api_sample_rate", 24000) or 24000)
+                out_sr = int(self.sample_rate or 16000)
+                # ~100ms blocks by default; configurable for tuning.
+                try:
+                    resample_block_ms = int(os.getenv("DOUBAO_RESAMPLE_BLOCK_MS", "100"))
+                except Exception:
+                    resample_block_ms = 100
+                resample_block_ms = max(20, min(500, resample_block_ms))
+                resample_block_n = int(api_sr * (resample_block_ms / 1000.0))
+                if resample_block_n <= 0:
+                    resample_block_n = int(api_sr * 0.1)
 
                 while self.state == State.RUNNING:
                     result = conn.receive_audio_chunk(timeout=5.0)
@@ -670,22 +740,28 @@ class DoubaoTTS(BaseTTS):
                                 result[:aligned_len], dtype=np.int16
                             ).astype(np.float32) / 32767.0
 
-                            # 重采样: 24kHz -> 16kHz
-                            if hasattr(self, 'api_sample_rate') and self.api_sample_rate != self.sample_rate:
-                                new_samples = resampy.resample(
-                                    new_samples,
-                                    sr_orig=self.api_sample_rate,
-                                    sr_new=self.sample_rate
-                                )
+                            if api_sr != out_sr:
+                                api_rate_buffer.push(new_samples)
+                                while len(api_rate_buffer) >= resample_block_n:
+                                    block = api_rate_buffer.pop(resample_block_n)
+                                    if block is None:
+                                        break
+                                    block_out = resampy.resample(block, sr_orig=api_sr, sr_new=out_sr)
+                                    audio_buffer.push(block_out)
+                            else:
+                                audio_buffer.push(new_samples)
 
-                            self.debug_wav.writeframes((new_samples * 32767).astype(np.int16).tobytes())
-                            audio_buffer = np.concatenate(
-                                [audio_buffer, new_samples])
+                            if self.debug_wav is not None and api_sr == out_sr:
+                                try:
+                                    self.debug_wav.writeframes((new_samples * 32767).astype(np.int16).tobytes())
+                                except Exception:
+                                    pass
 
                         # 发送完整的chunk
                         while len(audio_buffer) >= chunk_size and self.state == State.RUNNING:
-                            chunk = audio_buffer[:chunk_size].copy()
-                            audio_buffer = audio_buffer[chunk_size:]
+                            chunk = audio_buffer.pop(chunk_size)
+                            if chunk is None:
+                                break
 
                             eventpoint = {}
                             if first_chunk:
@@ -700,13 +776,24 @@ class DoubaoTTS(BaseTTS):
                 self.connection_pool.return_connection(conn)
 
                 # 发送剩余数据
-                if len(audio_buffer) > 0 and self.state == State.RUNNING:
-                    if len(audio_buffer) < chunk_size:
-                        padded = np.zeros(chunk_size, dtype=np.float32)
-                        padded[:len(audio_buffer)] = audio_buffer
-                        audio_buffer = padded
+                if api_sr != out_sr:
+                    # Flush any remaining api-rate samples.
+                    try:
+                        remaining = api_rate_buffer.pop(len(api_rate_buffer))
+                    except Exception:
+                        remaining = None
+                    if remaining is not None and remaining.size > 0:
+                        audio_buffer.push(resampy.resample(remaining, sr_orig=api_sr, sr_new=out_sr))
 
-                    chunk = audio_buffer[:chunk_size]
+                if len(audio_buffer) > 0 and self.state == State.RUNNING:
+                    chunk = audio_buffer.pop(min(chunk_size, len(audio_buffer)))
+                    if chunk is None:
+                        chunk = np.zeros(chunk_size, dtype=np.float32)
+                    if chunk.size < chunk_size:
+                        padded = np.zeros(chunk_size, dtype=np.float32)
+                        padded[:chunk.size] = chunk
+                        chunk = padded
+
                     eventpoint = {'status': 'end', 'text': text}
                     if first_chunk:
                         eventpoint['status'] = 'start'
@@ -736,6 +823,18 @@ class DoubaoTTS(BaseTTS):
         """关闭管理器"""
         self.connection_pool.shutdown()
         logger.info("[DOUBAO_TTS] 连接管理器已关闭")
+
+    def cleanup(self):
+        """资源清理（供 BaseReal.stop_all_threads 调用）"""
+        try:
+            self.shutdown()
+        except Exception:
+            pass
+        try:
+            if self.debug_wav is not None:
+                self.debug_wav.close()
+        except Exception:
+            pass
 
 
 # WebSocket连接管理类

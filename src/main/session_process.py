@@ -286,17 +286,18 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                     # - audio/video 都不允许无界积压（会造成 A/V 漂移）
                     # - 队列满时丢“最旧”数据，让系统快速追上实时（保持低延迟 + 同步）
                     if self.frame_type == "audio":
+                        # Audio is perceptually sensitive: prefer backpressure over dropping.
+                        # We still keep a bounded queue to prevent unbounded latency.
                         try:
-                            self.mp_queue.put(serialized, block=False)
+                            await asyncio.to_thread(self.mp_queue.put, serialized, True, 0.2)
                         except queue.Full:
+                            # As a last resort, drop the oldest audio (and paired video every 2 audio drops)
+                            # to keep the system live and maintain A/V alignment.
                             try:
                                 _old = self.mp_queue.get_nowait()
                                 del _old
                             except Exception:
                                 pass
-                            # If audio queue overflows, audio would "jump ahead" relative to video.
-                            # To keep strict lip-sync, also drop the corresponding oldest video frame
-                            # every 2 audio drops (2x20ms audio == 1x40ms video).
                             self._audio_overflow_drops += 1
                             if self.paired_video_queue is not None and self._audio_overflow_drops % 2 == 0:
                                 try:

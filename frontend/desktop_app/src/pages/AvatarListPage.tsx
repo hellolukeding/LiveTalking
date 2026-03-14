@@ -6,8 +6,7 @@ import {
   PlayCircleOutlined,
   PlusOutlined,
   SyncOutlined,
-  UserOutlined,
-  VideoCameraOutlined,
+  UserOutlined
 } from '@ant-design/icons';
 import { Avatar, Button, Card, Col, Empty, message, Modal, Row, Spin, Tag, Tooltip, Typography } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -178,7 +177,7 @@ export default function AvatarListPage() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <Button
+          {/* <Button
             type="text"
             icon={<VideoCameraOutlined />}
             onClick={() => navigate('/')}
@@ -187,7 +186,7 @@ export default function AvatarListPage() {
           >
             返回对话
           </Button>
-          <span style={{ color: '#ddd' }}>|</span>
+          <span style={{ color: '#ddd' }}>|</span> */}
           <Title level={4} style={{ margin: 0, color: '#333' }}>
             <UserOutlined style={{ marginRight: 8, color: COLORS.primary }} />
             数字人形象管理

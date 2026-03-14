@@ -604,14 +604,14 @@ class DoubaoTTS(BaseTTS):
         logger.info(
             f"[DOUBAO_TTS] 初始化: appid={self.appid}, voice_id={self.voice_id}")
 
-        # WebSocket连接池 - seed-tts-1.0 返回24kHz，需要重采样到16kHz
+        # WebSocket连接池 - seed-tts-1.0 违回24kHz，需要重采样到16kHz
         self.connection_pool = DoubaoConnectionPool(
             appid=self.appid,
             token=self.access_key,
             voice_id=self.voice_id,
             resource_id=self.resource_id,
             sample_rate=24000,  # API返回24kHz
-            max_connections=3
+            max_connections=10  # 增加连接池大小，支持更多并发请求
         )
         self.api_sample_rate = 24000  # 记录API采样率
 
@@ -1029,7 +1029,7 @@ class DoubaoConnectionPool:
     但我们可以预先建立连接等待使用，减少首次响应延迟。
     """
 
-    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, sample_rate: int = 16000, max_connections: int = 2):
+    def __init__(self, appid: str, token: str, voice_id: str, resource_id: str = None, sample_rate: int = 16000, max_connections: int = 10):
         self.appid = appid
         self.token = token
         self.voice_id = voice_id
@@ -1134,14 +1134,16 @@ class DoubaoConnectionPool:
         # 检查连接是否健康
         if conn.is_healthy():
             try:
-                # 尝试归还到预热队列
-                self._ready_connections.put(conn, timeout=0.1)
+                # 尝试归还到预热队列，增加等待时间
+                self._ready_connections.put(conn, timeout=1.0)
                 logger.debug(f"[WS_POOL] 连接已归还到池中 (当前池大小: {self._ready_connections.qsize()})")
                 return
-            except:
-                # 队列满，关闭此连接
-                logger.debug("[WS_POOL] 连接池已满，关闭连接")
+            except queue.Full:
+                # 队列确实满了，关闭最老的非活跃连接
+                logger.warning("[WS_POOL] 连接池已满，关闭当前连接")
                 conn.close()
+            except Exception as e:
+                logger.debug(f"[WS_POOL] 归还连接异常: {e}")
         else:
             logger.warning(f"[WS_POOL] 连接不健康 (error_count={conn.error_count})，关闭并重新创建")
             conn.close()

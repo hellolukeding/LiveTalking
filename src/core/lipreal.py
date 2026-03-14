@@ -22,10 +22,10 @@ import math
 # from .utils import *
 import os
 import pickle
-import queue
+# import queue  # 移除标准库 queue，使用 multiprocessing 的 Queue
 import re
 import time
-from queue import Queue
+# from queue import Queue  # 移除标准库 Queue，使用 mp.Queue
 from threading import Event, Thread
 
 import cv2
@@ -244,7 +244,7 @@ class LipReal(BaseReal):
 
         self.batch_size = opt.batch_size
         self.idx = 0
-        self.res_frame_queue = Queue(self.batch_size*2)  # mp.Queue
+        self.res_frame_queue = mp.Queue(self.batch_size*2)  # mp.Queue
         # 周期性指标上报线程（每10s输出一次可观测指标）
         self._metrics_running = True
         self._metrics_thread = Thread(target=self._metrics_logger, daemon=True)

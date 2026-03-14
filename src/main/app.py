@@ -36,6 +36,10 @@ import asyncio
 import base64
 import gc
 import json
+import sys
+import threading
+import traceback
+from contextlib import asynccontextmanager
 import os
 import random
 import re
@@ -119,12 +123,163 @@ class RateLimiter:
 MAX_AUDIO_SIZE = 10 * 1024 * 1024  # 10MB 最大音频文件大小
 MAX_TEXT_LENGTH = 10000  # 最大文本长度
 
+# ========== 全局超时保护配置 ==========
+GLOBAL_REQUEST_TIMEOUT = 60  # 全局请求超时（秒）
+HANDLER_TIMEOUT = 90  # 各个处理器的超时（秒）
+HEARTBEAT_INTERVAL = 30  # 心跳检测间隔（秒）
+
+# 全局超时统计（用于监控）
+timeout_stats = {
+    'timeouts': 0,
+    'last_timeout': None,
+    'active_requests': set()
+}
+
+@asynccontextmanager
+async def timeout_context(timeout_sec: float, request_info: str = ""):
+    """
+    全局超时上下文管理器
+    
+    使用 asyncio.timeout() (Python 3.11+) 而不是 wait_for
+    更好的异常处理和资源清理
+    """
+    task = asyncio.current_task()
+    request_id = id(task)
+    
+    # 记录活跃请求
+    timeout_stats['active_requests'].add(request_id)
+    
+    # 使用 asyncio.timeout 创建超时上下文
+    async with asyncio.timeout(timeout_sec) as timeout_cm:
+        try:
+            yield timeout_cm
+        except asyncio.TimeoutError:
+            timeout_stats['timeouts'] += 1
+            timeout_stats['last_timeout'] = {
+                'time': time.time(),
+                'request': request_info,
+                'task': str(task)
+            }
+            logger.warning(f"[超时] 请求超时: {request_info} (任务: {task.get_name()})")
+            raise
+        finally:
+            timeout_stats['active_requests'].discard(request_id)
+
+
+async def timeout_middleware_factory(app, handler):
+    """
+    全局超时中间件 - 保护所有请求
+    
+    自动为所有请求添加超时保护
+    """
+    async def middleware_handler(request):
+        request_path = request.path
+        request_method = request.method
+        
+        # 为所有请求添加全局超时保护
+        try:
+            async with timeout_context(GLOBAL_REQUEST_TIMEOUT, f"{request_method} {request_path}"):
+                response = await handler(request)
+                return response
+        except asyncio.TimeoutError:
+            return web.Response(
+                status=504,
+                text=json.dumps({
+                    "code": -1,
+                    "msg": "请求处理超时",
+                    "timeout": GLOBAL_REQUEST_TIMEOUT
+                }),
+                content_type="application/json"
+            )
+        except Exception as e:
+            logger.exception(f"[中间件] 请求处理异常: {request_path}")
+            return web.Response(
+                status=500,
+                text=json.dumps({
+                    "code": -1,
+                    "msg": f"服务器错误: {str(e)}"
+                }),
+                content_type="application/json"
+            )
+    
+    return middleware_handler
+
+
+async def safe_request_json(request, max_size=1024*1024):
+    """
+    安全的 JSON 请求解析，带超时保护
+    
+    解决 request.json() 永久挂起的问题
+    """
+    try:
+        # 添加读取超时
+        async with asyncio.timeout(5):  # 5秒超时
+            # 先检查 content-length
+            if request.content_length and request.content_length > max_size:
+                raise ValueError(f"请求体过大: {request.content_length} > {max_size}")
+            
+            data = await request.json()
+            return data
+    except asyncio.TimeoutError:
+        logger.error(f"[请求] JSON 解析超时")
+        raise ValueError("请求读取超时")
+    except Exception as e:
+        logger.error(f"[请求] JSON 解析失败: {e}")
+        raise
+
+
+async def safe_request_post(request, max_size=MAX_AUDIO_SIZE):
+    """
+    安全的 POST 表单解析，带超时保护
+    
+    解决 request.post() 永久挂起的问题
+    """
+    try:
+        async with asyncio.timeout(5):  # 5秒超时
+            # 先检查 content-length
+            if request.content_length and request.content_length > max_size:
+                raise ValueError(f"请求体过大: {request.content_length} > {max_size}")
+            
+            form = await request.post()
+            return form
+    except asyncio.TimeoutError:
+        logger.error(f"[请求] POST 表单解析超时")
+        raise ValueError("请求读取超时")
+    except Exception as e:
+        logger.error(f"[请求] POST 表单解析失败: {e}")
+        raise
+
 
 def randN(N) -> int:
     '''生成长度为 N的随机数 '''
     min = pow(10, N - 1)
     max = pow(10, N)
     return random.randint(min, max - 1)
+
+
+# ========== 全局锁优化 ==========
+# 使用 try_lock 避免死锁，并提供锁超时
+async def safe_nerfreals_operation(timeout_sec=5):
+    """
+    安全的 nerfreals 操作上下文管理器
+    
+    使用 try_lock 避免永久死锁
+    如果获取锁失败，记录警告但不阻塞
+    """
+    acquired = False
+    try:
+        acquired = await asyncio.wait_for(nerfreals_lock.acquire(), timeout=timeout_sec)
+        if acquired:
+            yield
+        else:
+            logger.warning("[锁] 无法获取 nerfreals_lock，跳过操作")
+            yield None  # 返回 None 表示跳过
+    except asyncio.TimeoutError:
+        logger.warning(f"[锁] 获取 nerfreals_lock 超时 ({timeout_sec}s)")
+        yield None
+    finally:
+        if acquired:
+            nerfreals_lock.release()
 
 
 def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
@@ -174,7 +329,7 @@ def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
 
 async def offer(request):
     try:
-        params = await request.json()
+        params = await safe_request_json(request)
         logger.debug(f"[OFFER] Received offer request: {params}")
 
         if not params or 'sdp' not in params or 'type' not in params:
@@ -641,7 +796,7 @@ async def offer(request):
 
 async def human(request):
     try:
-        params = await request.json()
+        params = await safe_request_json(request)
         logger.debug(f"[HUMAN] Received human request: {params}")
 
         # Validate request parameters
@@ -791,7 +946,7 @@ async def human(request):
 
 async def interrupt_talk(request):
     try:
-        params = await request.json()
+        params = await safe_request_json(request)
 
         # 验证 sessionid 格式
         sessionid = params.get('sessionid')
@@ -829,7 +984,7 @@ async def interrupt_talk(request):
 
 async def humanaudio(request):
     try:
-        form = await request.post()
+        form = await safe_request_post(request)
 
         # 验证 sessionid 格式
         sessionid_str = form.get('sessionid', '0')
@@ -1445,7 +1600,11 @@ if __name__ == '__main__':
     nerfreals_lock = asyncio.Lock()
     logger.info("[安全] 频率限制器和会话锁已初始化")
 
-    appasync = web.Application(client_max_size=1024**2*100)
+    # 创建应用并配置超时中间件
+    appasync = web.Application(
+        client_max_size=1024**2*100,
+        middlewares=[timeout_middleware_factory]  # 全局超时中间件
+    )
     appasync.on_shutdown.append(on_shutdown)
     appasync.router.add_post("/offer", offer)
     appasync.router.add_post("/human", human)
@@ -1468,6 +1627,58 @@ if __name__ == '__main__':
 
 
     appasync.router.add_static('/', path='frontend/web')
+
+    # ========== 启动监控任务 ==========
+    async def monitor_task():
+        """监控任务：检测异常状态并记录"""
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                
+                # 检查活跃请求数量
+                active_count = len(timeout_stats['active_requests'])
+                if active_count > 0:
+                    logger.info(f"[监控] 活跃请求: {active_count}")
+                
+                # 检查超时统计
+                if timeout_stats['timeouts'] > 0:
+                    logger.warning(f"[监控] 超时统计: 总计 {timeout_stats['timeouts']} 次")
+                    if timeout_stats['last_timeout']:
+                        last = timeout_stats['last_timeout']
+                        logger.warning(f"[监控] 最后超时: {last}")
+                
+                # 检查会话状态
+                session_count = len(nerfreals)
+                if session_count > 0:
+                    logger.info(f"[监控] 活跃会话: {session_count}")
+                    
+                    # 检查是否有僵尸会话（会话存在但没有活动）
+                    cleanup_count = 0
+                    for sessionid in list(nerfreals.keys()):
+                        nerfreal = nerfreals[sessionid]
+                        if nerfreal is None:
+                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (None)")
+                            del nerfreals[sessionid]
+                            cleanup_count += 1
+                        elif not hasattr(nerfreal, 'datachannel') or nerfreal.datachannel is None:
+                            logger.warning(f"[监控] 发现僵尸会话: {sessionid} (无 datachannel)")
+                            try:
+                                if hasattr(nerfreal, 'stop_all_threads'):
+                                    nerfreal.stop_all_threads()
+                            except:
+                                pass
+                            del nerfreals[sessionid]
+                            cleanup_count += 1
+                    
+                    if cleanup_count > 0:
+                        logger.info(f"[监控] 已清理 {cleanup_count} 个僵尸会话")
+                    
+            except Exception as e:
+                logger.error(f"[监控] 监控任务异常: {e}")
+    
+    # 启动监控任务
+    asyncio.create_task(monitor_task())
+    logger.info("[监控] 监控任务已启动")
 
     # 配置默认CORS设置
     cors = aiohttp_cors.setup(appasync, defaults={

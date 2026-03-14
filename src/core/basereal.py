@@ -549,8 +549,18 @@ class BaseReal:
         logger.debug("notify:%s", eventpoint)
         # 发送TTS完成信号到前端
         if eventpoint:
-            msg = json.dumps(eventpoint)
-            self.send_custom_msg(msg)
+            try:
+                # 确保 eventpoint 可以被 JSON 序列化
+                if isinstance(eventpoint, dict):
+                    # 清理不可序列化的值
+                    clean_eventpoint = {k: v for k, v in eventpoint.items() 
+                                        if isinstance(v, (str, int, float, bool, type(None)))}
+                    msg = json.dumps(clean_eventpoint)
+                else:
+                    msg = json.dumps({"status": str(eventpoint)})
+                self.send_custom_msg(msg)
+            except (TypeError, ValueError) as e:
+                logger.error(f"[NOTIFY] 序列化 eventpoint 失败: {e}")
 
     def start_recording(self):
         """开始录制视频"""

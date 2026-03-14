@@ -115,6 +115,10 @@ class RateLimiter:
 # 全局频率限制器和会话锁（在应用启动后初始化）
 # 注意：不在模块级别声明，直接在 main 函数中初始化
 
+# 安全常量
+MAX_AUDIO_SIZE = 10 * 1024 * 1024  # 10MB 最大音频文件大小
+MAX_TEXT_LENGTH = 10000  # 最大文本长度
+
 
 def randN(N) -> int:
     '''生成长度为 N的随机数 '''
@@ -262,8 +266,22 @@ async def offer(request):
 
             logger.debug(f"[OFFER] Building nerfreal for session {sessionid}")
 
-            # Build nerfreal in executor to avoid blocking
-            nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id)
+            # Build nerfreal in executor to avoid blocking (with timeout)
+            try:
+                nerfreal = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(None, build_nerfreal, sessionid, avatar_id),
+                    timeout=30.0  # 30 秒超时
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"[OFFER] 构建超时，会话 {sessionid}")
+                async with nerfreals_lock:
+                    if sessionid in nerfreals:
+                        del nerfreals[sessionid]
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({"code": -1, "msg": "初始化超时"}),
+                    status=504
+                )
 
             if nerfreal is None:
                 raise RuntimeError("Failed to build nerfreal instance")
@@ -840,7 +858,28 @@ async def humanaudio(request):
 
         fileobj = form["file"]
         filename = fileobj.filename
-        filebytes = fileobj.file.read()
+
+        # 检查文件大小（防止内存耗尽）
+        content_length = request.content_length
+        if content_length and content_length > MAX_AUDIO_SIZE:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": f"文件太大，最大允许 {MAX_AUDIO_SIZE // (1024*1024)}MB"}),
+                status=413
+            )
+
+        # 读取文件，带大小限制
+        filebytes = fileobj.file.read(MAX_AUDIO_SIZE)
+        if len(filebytes) == MAX_AUDIO_SIZE:
+            # 检查是否还有更多数据
+            chunk = fileobj.file.read(1)
+            if chunk:
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({"code": -1, "msg": f"文件太大，最大允许 {MAX_AUDIO_SIZE // (1024*1024)}MB"}),
+                    status=413
+                )
+
         nerfreals[sessionid].put_audio_file(filebytes)
 
         return web.Response(

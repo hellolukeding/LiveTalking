@@ -672,6 +672,19 @@ class DoubaoTTS(BaseTTS):
             requested_sample_rate = 24000
 
         self.api_sample_rate = requested_sample_rate  # 记录API采样率（若服务端不支持会导致重采样兜底）
+        self._allow_runtime_voice_switch = os.getenv("DOUBAO_RUNTIME_VOICE_SWITCH", "false").lower() in ("1", "true", "yes", "on")
+        try:
+            self._recv_timeout_sec = float(os.getenv("DOUBAO_TTS_RECV_TIMEOUT_SEC", "5.0"))
+        except Exception:
+            self._recv_timeout_sec = 5.0
+        if self._recv_timeout_sec < 1.0:
+            self._recv_timeout_sec = 1.0
+        try:
+            self._max_idle_timeouts = int(os.getenv("DOUBAO_TTS_MAX_IDLE_TIMEOUTS", "3"))
+        except Exception:
+            self._max_idle_timeouts = 3
+        if self._max_idle_timeouts < 1:
+            self._max_idle_timeouts = 1
         self._fallback_voice_candidates = self._build_fallback_voice_candidates()
         self._resolve_working_voice(prefer_different=False, force_refresh=False)
         self.connection_pool = self._create_connection_pool()
@@ -722,8 +735,7 @@ class DoubaoTTS(BaseTTS):
         configured = os.getenv("DOUBAO_FALLBACK_VOICE_IDS", "")
         env_primary = (os.getenv("DOUBAO_VOICE_ID") or "").strip()
         default_primary = "zh_female_tianxinxiaomei_emo_v2_mars_bigtts"
-        default_secondary = "zh_male_yangguangqingnian_mars_bigtts"
-        for item in [env_primary, default_primary, default_secondary, configured]:
+        for item in [env_primary, default_primary, configured]:
             if not item:
                 continue
             if "," in item:
@@ -838,6 +850,13 @@ class DoubaoTTS(BaseTTS):
         )
         return False
 
+    def _retry_with_rebuilt_pool(self, msg: tuple[str, dict], retried: bool) -> bool:
+        if retried:
+            return False
+        self._rebuild_connection_pool()
+        self._txt_to_audio_impl(msg, retried=True)
+        return True
+
     def _run_edge_fallback(self, text: str, textevent: dict):
         if not self._edge_fallback_enabled:
             return
@@ -868,11 +887,13 @@ class DoubaoTTS(BaseTTS):
             conn = self.connection_pool.get_connection()
             if not conn:
                 logger.error("[DOUBAO_TTS] 无法获取连接")
-                if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                if self._retry_with_rebuilt_pool(msg, retried):
+                    return
+                if self._allow_runtime_voice_switch and self._resolve_working_voice(prefer_different=True, force_refresh=True):
                     self._rebuild_connection_pool()
                     self._txt_to_audio_impl(msg, retried=True)
-                else:
-                    self._run_edge_fallback(text, textevent)
+                    return
+                self._run_edge_fallback(text, textevent)
                 return
 
             try:
@@ -880,11 +901,13 @@ class DoubaoTTS(BaseTTS):
                 if not conn.send_text_request(text, reqid, context_texts=[]):
                     logger.error("[DOUBAO_TTS] 发送请求失败")
                     self.connection_pool.return_connection(conn)
-                    if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                    if self._retry_with_rebuilt_pool(msg, retried):
+                        return
+                    if self._allow_runtime_voice_switch and self._resolve_working_voice(prefer_different=True, force_refresh=True):
                         self._rebuild_connection_pool()
                         self._txt_to_audio_impl(msg, retried=True)
-                    else:
-                        self._run_edge_fallback(text, textevent)
+                        return
+                    self._run_edge_fallback(text, textevent)
                     return
 
                 # 简化的流式处理
@@ -934,6 +957,7 @@ class DoubaoTTS(BaseTTS):
                 first_chunk = True
                 total_sent = 0
                 start_time = None
+                idle_timeouts = 0
                 # For resampling, process in blocks to reduce overhead.
                 api_sr = int(getattr(self, "api_sample_rate", 24000) or 24000)
                 out_sr = int(self.sample_rate or 16000)
@@ -948,9 +972,14 @@ class DoubaoTTS(BaseTTS):
                     resample_block_n = int(api_sr * 0.1)
 
                 while self.state == State.RUNNING:
-                    result = conn.receive_audio_chunk(timeout=5.0)
+                    result = conn.receive_audio_chunk(timeout=self._recv_timeout_sec)
                     if result is None:
+                        reason = getattr(conn, "last_receive_reason", "")
+                        if reason == "timeout" and idle_timeouts < self._max_idle_timeouts:
+                            idle_timeouts += 1
+                            continue
                         break
+                    idle_timeouts = 0
                     if isinstance(result, bytes) and len(result) == 0:
                         continue
                     if isinstance(result, bytes) and len(result) > 0:
@@ -1033,12 +1062,14 @@ class DoubaoTTS(BaseTTS):
                         np.zeros(chunk_size, dtype=np.float32), eventpoint)
                 else:
                     logger.warning("[DOUBAO_TTS] No audio chunks sent")
-                    if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                    if self._retry_with_rebuilt_pool(msg, retried):
+                        return
+                    if self._allow_runtime_voice_switch and self._resolve_working_voice(prefer_different=True, force_refresh=True):
                         self._rebuild_connection_pool()
                         self._txt_to_audio_impl(msg, retried=True)
-                    else:
-                        logger.warning("[DOUBAO_TTS] Doubao retry failed, switching to Edge fallback")
-                        self._run_edge_fallback(text, textevent)
+                        return
+                    logger.warning("[DOUBAO_TTS] Doubao retry failed, switching to Edge fallback")
+                    self._run_edge_fallback(text, textevent)
 
                 logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个chunk")
 
@@ -1046,11 +1077,13 @@ class DoubaoTTS(BaseTTS):
                 logger.error(f"[DOUBAO_TTS] 异常: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                if self._retry_with_rebuilt_pool(msg, retried):
+                    return
+                if self._allow_runtime_voice_switch and self._resolve_working_voice(prefer_different=True, force_refresh=True):
                     self._rebuild_connection_pool()
                     self._txt_to_audio_impl(msg, retried=True)
-                else:
-                    self._run_edge_fallback(text, textevent)
+                    return
+                self._run_edge_fallback(text, textevent)
 
     def txt_to_audio(self, msg: tuple[str, dict]):
         self._txt_to_audio_impl(msg, retried=False)
@@ -1102,6 +1135,7 @@ class DoubaoWebSocketConnection:
         self.request_count = 0
         self.error_count = 0
         self.lock = threading.Lock()
+        self.last_receive_reason = "init"
 
     def _get_resource_id(self) -> str:
         """获取资源ID - 优先使用已选择的 resource_id"""
@@ -1236,6 +1270,7 @@ class DoubaoWebSocketConnection:
 
             if not isinstance(result, bytes) or len(result) < 4:
                 logger.warning(f"[WS_MANAGER] 收到无效数据: type={type(result)}")
+                self.last_receive_reason = "invalid"
                 return None
 
             # 解析响应头
@@ -1250,6 +1285,7 @@ class DoubaoWebSocketConnection:
             # 0xb = audio-only server response
             if message_type == 0xb:
                 if message_flags == 0:
+                    self.last_receive_reason = "ack"
                     return b''  # ACK，继续接收
                 else:
                     if len(payload) >= 8:
@@ -1257,6 +1293,7 @@ class DoubaoWebSocketConnection:
 
                         if seq < 0:
                             logger.debug("[WS_MANAGER] 收到音频结束标志 (seq < 0)")
+                            self.last_receive_reason = "end"
                             return None  # 结束
 
                         # 🆕 修复：正确解析 payload 结构
@@ -1280,8 +1317,10 @@ class DoubaoWebSocketConnection:
                         audio_data = payload[offset:offset+audio_len]
 
                         if len(audio_data) > 0:
+                            self.last_receive_reason = "audio"
                             return audio_data
 
+                    self.last_receive_reason = "audio_header_only"
                     return b''
 
             # 0x9 = full server response (元数据)
@@ -1293,9 +1332,11 @@ class DoubaoWebSocketConnection:
                     # 检查是否是结束标志（空的JSON响应 {}）
                     if response_str.strip() == '{}' or response_str.endswith('{}'):
                         logger.debug("[WS_MANAGER] 收到元数据结束标志")
+                        self.last_receive_reason = "end"
                         return None
                 except Exception as e:
                     logger.warning(f"[WS_MANAGER] 解析元数据失败: {e}")
+                self.last_receive_reason = "metadata"
                 return b''  # 继续接收
 
             # 0xf = error response
@@ -1313,24 +1354,29 @@ class DoubaoWebSocketConnection:
                             f"[WS_MANAGER] 错误 (code={error_code}): {error_msg}")
                 except Exception as e:
                     logger.error(f"[WS_MANAGER] 解析错误失败: {e}")
+                self.last_receive_reason = "error"
                 return None
 
+            self.last_receive_reason = "ack"
             return b''
 
         except websocket.WebSocketTimeoutException:
             logger.warning(f"[WS_MANAGER] 超时 ({timeout}s)")
+            self.last_receive_reason = "timeout"
             return None
         except websocket.WebSocketConnectionClosedException as e:
             logger.error(f"[WS_MANAGER] WebSocket连接被远程关闭: {e}")
             with self.lock:
                 self.error_count += 1
                 self.is_connected = False
+            self.last_receive_reason = "closed"
             return None
         except ssl.SSLError as e:
             logger.error(f"[WS_MANAGER] SSL错误: {e}")
             with self.lock:
                 self.error_count += 1
                 self.is_connected = False
+            self.last_receive_reason = "ssl_error"
             return None
         except Exception as e:
             logger.error(f"[WS_MANAGER] 接收失败: {e}")
@@ -1339,6 +1385,7 @@ class DoubaoWebSocketConnection:
             with self.lock:
                 self.error_count += 1
                 self.is_connected = False
+            self.last_receive_reason = "exception"
             return None
 
     def close(self):

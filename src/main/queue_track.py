@@ -88,6 +88,7 @@ class QueueAudioTrack(MediaStreamTrack):
         self._last_underflow_log = 0.0
         # Small local buffer to absorb mp.Queue scheduling jitter.
         self._local_buf: deque = deque()
+        self._last_good_frame_data = None
 
         logger.info(f"[QueueAudioTrack] Created for session {session_id}")
 
@@ -186,10 +187,19 @@ class QueueAudioTrack(MediaStreamTrack):
                     f"[QueueAudioTrack] Session {self.session_id} underflow x{self._underflow_count} "
                     f"(sr={self._sample_rate}, samples={self._frame_samples})"
                 )
-            audio_frame = self._make_silence()
+            # Try repeating the last good frame once before falling back to silence.
+            audio_frame = None
+            if self._last_good_frame_data is not None:
+                try:
+                    audio_frame = deserialize_audio_frame(self._last_good_frame_data)
+                except Exception:
+                    audio_frame = None
+            if audio_frame is None:
+                audio_frame = self._make_silence()
         else:
             try:
                 audio_frame = deserialize_audio_frame(frame_data)
+                self._last_good_frame_data = frame_data
             except Exception as e:
                 logger.error(f"[QueueAudioTrack] Failed to deserialize audio frame: {e}")
                 sample_rate = None

@@ -53,13 +53,14 @@ class VADConfig:
     # VAD thresholds are RMS in [0,1]. Defaults bias slightly towards sensitivity;
     # a noise-adaptive floor (below) helps avoid false triggers in noisy rooms.
     rms_speech: float = 0.006
-    rms_barge_in: float = 0.012
+    rms_barge_in: float = 0.010
     end_silence_ms: int = 400
-    min_utterance_ms: int = 450
+    min_utterance_ms: int = 350
     max_utterance_ms: int = 8000
-    cooldown_ms: int = 1200
-    dedup_window_ms: int = 5000
-    barge_in_ms: int = 200
+    cooldown_ms: int = 500
+    dedup_window_ms: int = 3000
+    barge_in_ms: int = 120
+    barge_in_preroll_ms: int = 320
     enable_orchestrator: bool = True
     noise_adapt: bool = True
     noise_alpha: float = 0.05
@@ -72,13 +73,14 @@ class VADConfig:
         return cls(
             sample_rate_out=_env_int("ORCH_ASR_SR", 16000),
             rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.006),
-            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.012),
+            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.010),
             end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 400),
-            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 450),
+            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 350),
             max_utterance_ms=_env_int("ORCH_VAD_MAX_UTTERANCE_MS", 8000),
-            cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 1200),
-            dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 5000),
-            barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 200),
+            cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 500),
+            dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 3000),
+            barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 120),
+            barge_in_preroll_ms=_env_int("ORCH_BARGE_IN_PREROLL_MS", 320),
             enable_orchestrator=_env_bool("ORCH_ENABLED", True),
             noise_adapt=_env_bool("ORCH_VAD_NOISE_ADAPT", True),
             noise_alpha=_env_float("ORCH_VAD_NOISE_ALPHA", 0.05),
@@ -137,6 +139,9 @@ class ConversationOrchestrator:
         self._utterance_sr: Optional[int] = None
 
         self._barge_in_started_time: Optional[float] = None
+        self._barge_in_audio_buf: list[np.ndarray] = []
+        self._barge_in_sr: Optional[int] = None
+        self._barge_in_buf_samples = 0
 
         self._noise_rms: Optional[float] = None
         self._last_debug_time = 0.0
@@ -243,18 +248,26 @@ class ConversationOrchestrator:
             if rms >= thr_barge:
                 if self._barge_in_started_time is None:
                     self._barge_in_started_time = now
+                    self._barge_in_audio_buf = []
+                    self._barge_in_sr = sr
+                    self._barge_in_buf_samples = 0
+                self._append_barge_in_audio(mono, sr)
                 if (now - self._barge_in_started_time) * 1000.0 >= self.cfg.barge_in_ms:
                     logger.info(f"[ORCH-{self.session_id}] Barge-in detected (rms={rms:.4f})")
-                    self._barge_in_started_time = None
                     self._start_new_turn(interrupt=True)
-                    # Start capturing utterance immediately after barge-in
+                    # Start capturing utterance and include pre-trigger audio so short phrases are not lost.
                     self._begin_speech(now, sr)
-                    self._append_audio(mono, sr)
+                    if self._barge_in_audio_buf:
+                        for segment in self._barge_in_audio_buf:
+                            self._append_audio(segment, sr)
+                    else:
+                        self._append_audio(mono, sr)
+                    self._reset_barge_in_state()
             else:
-                self._barge_in_started_time = None
+                self._reset_barge_in_state()
             return
 
-        self._barge_in_started_time = None
+        self._reset_barge_in_state()
 
         is_voice = rms >= thr_speech
         if is_voice:
@@ -276,6 +289,30 @@ class ConversationOrchestrator:
         self._last_voice_time = now
         self._utterance_buf = []
         self._utterance_sr = sr
+
+    def _reset_barge_in_state(self):
+        self._barge_in_started_time = None
+        self._barge_in_audio_buf = []
+        self._barge_in_sr = None
+        self._barge_in_buf_samples = 0
+
+    def _append_barge_in_audio(self, mono: np.ndarray, sr: int):
+        if self._barge_in_sr is None:
+            self._barge_in_sr = sr
+        if sr != self._barge_in_sr:
+            self._barge_in_audio_buf = []
+            self._barge_in_buf_samples = 0
+            self._barge_in_sr = sr
+
+        segment = mono.copy()
+        self._barge_in_audio_buf.append(segment)
+        self._barge_in_buf_samples += int(segment.size)
+
+        # Keep only a bounded pre-roll window.
+        max_samples = int(max(1, sr * (self.cfg.barge_in_preroll_ms / 1000.0)))
+        while self._barge_in_buf_samples > max_samples and self._barge_in_audio_buf:
+            removed = self._barge_in_audio_buf.pop(0)
+            self._barge_in_buf_samples -= int(removed.size)
 
     def _append_audio(self, mono: np.ndarray, sr: int):
         if self._utterance_sr is None:
@@ -303,10 +340,17 @@ class ConversationOrchestrator:
         self._reset_speech_state()
 
         if dur_ms < self.cfg.min_utterance_ms:
+            logger.debug(
+                f"[ORCH-{self.session_id}] Drop utterance: too short {dur_ms:.0f}ms < {self.cfg.min_utterance_ms}ms"
+            )
             return
 
         # Cooldown to avoid rapid repeat triggers
-        if (time.perf_counter() - self._last_asr_time) * 1000.0 < self.cfg.cooldown_ms:
+        cooldown_elapsed_ms = (time.perf_counter() - self._last_asr_time) * 1000.0
+        if cooldown_elapsed_ms < self.cfg.cooldown_ms:
+            logger.debug(
+                f"[ORCH-{self.session_id}] Drop utterance: cooldown {cooldown_elapsed_ms:.0f}ms < {self.cfg.cooldown_ms}ms"
+            )
             return
 
         self._last_asr_time = time.perf_counter()

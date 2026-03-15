@@ -94,3 +94,5 @@ def test_barge_in_interrupts_tts(monkeypatch):
 
     assert nerfreal.interrupt_count == 1
     assert orch._in_speech is True
+    # Pre-roll buffering keeps early speech frames that occur before barge-in is formally triggered.
+    assert len(orch._utterance_buf) >= 2

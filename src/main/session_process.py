@@ -265,6 +265,10 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                 self.drop_count = 0
                 # Audio overflow dropping must keep A/V aligned (2 audio chunks per 1 video frame @ 25fps).
                 self._audio_overflow_drops = 0
+                try:
+                    self.audio_put_timeout_s = float(os.getenv("AUDIO_QUEUE_PUT_TIMEOUT_MS", "1000")) / 1000.0
+                except Exception:
+                    self.audio_put_timeout_s = 1.0
 
             async def put(self, frame_data):
                 """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
@@ -289,7 +293,7 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                         # Audio is perceptually sensitive: prefer backpressure over dropping.
                         # We still keep a bounded queue to prevent unbounded latency.
                         try:
-                            await asyncio.to_thread(self.mp_queue.put, serialized, True, 0.2)
+                            await asyncio.to_thread(self.mp_queue.put, serialized, True, self.audio_put_timeout_s)
                         except queue.Full:
                             # As a last resort, drop the oldest audio (and paired video every 2 audio drops)
                             # to keep the system live and maintain A/V alignment.

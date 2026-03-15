@@ -1800,7 +1800,7 @@ if __name__ == '__main__':
                         help="Video codec preference (default: auto)")
 
     # musetalk opt
-    parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
+    parser.add_argument('--avatar_id', type=str, default='avatar_498cdabe',
                         help="define which avatar in data/avatars")
     # parser.add_argument('--bbox_shift', type=int, default=5)
     parser.add_argument('--batch_size', type=int,

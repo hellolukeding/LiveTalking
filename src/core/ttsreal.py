@@ -682,7 +682,7 @@ class DoubaoTTS(BaseTTS):
         self.optimizer = None
         self._processing_lock = threading.Lock()
         self._edge_fallback_voice = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
-        self._edge_fallback_enabled = os.getenv("DOUBAO_TTS_EDGE_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
+        self._edge_fallback_enabled = os.getenv("DOUBAO_TTS_EDGE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
         logger.info("[DOUBAO_TTS] 初始化完成")
         self.debug_wav = None
         if os.getenv("DOUBAO_TTS_DEBUG_WAV", "0") == "1":
@@ -947,13 +947,16 @@ class DoubaoWebSocketConnection:
 
     def _get_resource_id(self) -> str:
         """获取资源ID - 根据音色ID自动匹配正确的resource_id"""
-        if self.resource_id:
-            # 检查是否是 BV 开头的标准音色
-            if self.voice_id.startswith('BV'):
-                # 对于标准音色，不使用自定义 resource_id，使用默认值
-                logger.warning(f"[DOUBAO_TTS] 检测到标准音色 {self.voice_id}，忽略配置的 resource_id={self.resource_id}，使用默认值")
+        voice = (self.voice_id or "").strip()
+        resource = (self.resource_id or "").strip()
+        if resource:
+            # zh_* / BV* 音色在错误 resource_id 下会直接无声或回退，强制纠偏到默认值
+            if (voice.startswith('BV') or voice.startswith('zh_')) and resource != "volc.service_type.10029":
+                logger.warning(
+                    f"[DOUBAO_TTS] voice_id={voice} 与 resource_id={resource} 不匹配，自动改用 volc.service_type.10029"
+                )
                 return "volc.service_type.10029"
-            return self.resource_id
+            return resource
         # 默认值
         return "volc.service_type.10029"
 

@@ -36,13 +36,13 @@ def _resolve_resource_id(voice_id: str) -> str:
     voice = (voice_id or "").strip()
 
     if configured:
-        # 标准音色 + 不匹配 resource_id 容易失败，优先切回默认 service_type
-        if voice.startswith("BV") and configured != "volc.service_type.10029":
+        # zh_* / BV* 音色 + 不匹配 resource_id 容易失败，优先切回默认 service_type
+        if (voice.startswith("BV") or voice.startswith("zh_")) and configured != "volc.service_type.10029":
             return "volc.service_type.10029"
         return configured
 
     # 未配置时根据音色做兜底
-    if voice.startswith("BV") or voice.startswith("zh_") or voice.startswith("S_"):
+    if voice.startswith("BV") or voice.startswith("zh_"):
         return "volc.service_type.10029"
     return "volc.service_type.10029"
 

@@ -26,6 +26,10 @@ const client = axios.create({
 // 添加请求拦截器
 client.interceptors.request.use(
     (config) => {
+        // 统一去掉前导斜杠，避免 baseURL + '/path' 在部分后端/代理下变成 //path 导致 404
+        if (typeof config.url === 'string') {
+            config.url = config.url.replace(/^\/+/, '');
+        }
         console.log('[API] Request:', {
             method: config.method,
             url: config.url,

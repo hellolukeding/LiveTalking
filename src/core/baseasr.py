@@ -77,9 +77,27 @@ class BaseASR:
         except Exception:
             last_audio_in = None
 
-        is_idle = last_audio_in is not None and (now - last_audio_in) > idle_threshold_s
+        # 关键修复：
+        # 不能仅依赖“最近一次入队时间”判断 idle。TTS 常会突发入队大量音频，
+        # 若消费者稍慢，队列里仍有语音但 last_audio_in 已过阈值，会被误判为静音，
+        # 导致口型不动/句尾丢口型。
+        has_buffered_audio = False
+        try:
+            has_buffered_audio = not self.queue.empty()
+        except Exception:
+            has_buffered_audio = False
+
+        is_idle = (not has_buffered_audio) and last_audio_in is not None and (now - last_audio_in) > idle_threshold_s
 
         if is_idle:
+            # 再做一次非阻塞兜底读取，避免 queue.empty() 竞争条件导致误判。
+            try:
+                frame, eventpoint = self.queue.get_nowait()
+                type = 0
+                return frame, type, eventpoint
+            except queue.Empty:
+                pass
+
             # Idle: generate paced silence/custom-audio at 20ms per frame without blocking waits.
             if self.parent and self.parent.curr_state > 1:  # 播放自定义音频
                 time.sleep(frame_period_s)

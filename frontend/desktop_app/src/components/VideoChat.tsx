@@ -39,7 +39,8 @@ interface ASRBuffer {
 }
 
 const TTS_FALLBACK_TIMEOUT_MS = 2500;
-const USE_WEBRTC_UPSTREAM_ASR = String(import.meta.env.VITE_USE_WEBRTC_UPSTREAM_ASR ?? 'true').toLowerCase() === 'true';
+const USE_WEBRTC_UPSTREAM_ASR = String(import.meta.env.VITE_USE_WEBRTC_UPSTREAM_ASR ?? 'false').toLowerCase() === 'true';
+const AUTO_DISCONNECT_MS = Number(import.meta.env.VITE_AUTO_DISCONNECT_MS ?? 0);
 
 export default function VideoChat() {
     const navigate = useNavigate();
@@ -805,11 +806,11 @@ export default function VideoChat() {
 
     const resetTimer = () => {
         if (timerRef.current) clearTimeout(timerRef.current);
-        if (isStarted) {
+        if (isStarted && AUTO_DISCONNECT_MS > 0) {
             timerRef.current = setTimeout(() => {
                 message.info('长时间未操作，已自动断开连接');
-                stop();
-            }, 60000);
+                stop('auto_timeout');
+            }, AUTO_DISCONNECT_MS);
         }
     };
 
@@ -1033,8 +1034,9 @@ export default function VideoChat() {
         }
     };
 
-    const stop = () => {
-        stopBackendASR('stop_call');
+    const stop = (reason: string = 'manual') => {
+        console.log('[CALL] stop called:', reason);
+        stopBackendASR(`stop_call:${reason}`);
 
         if (pcRef.current) {
             pcRef.current.close();
@@ -1137,7 +1139,7 @@ export default function VideoChat() {
 
     useEffect(() => {
         return () => {
-            stop();
+            stop('unmount');
             // 清理所有定时器
             if (aiSpeakingTimeoutRef.current) {
                 clearTimeout(aiSpeakingTimeoutRef.current);
@@ -1378,7 +1380,7 @@ export default function VideoChat() {
                 <div className="flex justify-center">
                     {isStarted ? (
                         <button
-                            onClick={stop}
+                            onClick={() => stop('hangup_button')}
                             style={{
                                 width: 64,
                                 height: 64,

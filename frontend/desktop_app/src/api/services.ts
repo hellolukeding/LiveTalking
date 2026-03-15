@@ -60,24 +60,36 @@ export const sendHumanMessage = async (
     } = {}
 ) => {
     const { type = 'chat', interrupt = true } = options;
+    const sid = Number(sessionId);
+    if (!Number.isInteger(sid) || sid <= 0) {
+        throw new Error(`Invalid sessionId: ${sessionId}`);
+    }
     return client.post('/human', {
         text,
         type,
         interrupt,
-        sessionid: parseInt(sessionId),
+        sessionid: sid,
     });
 };
 
 export const isSpeaking = async (sessionId: string): Promise<SpeakingStatus> => {
+    const sid = Number(sessionId);
+    if (!Number.isInteger(sid) || sid <= 0) {
+        throw new Error(`Invalid sessionId: ${sessionId}`);
+    }
     const response = await client.post('/is_speaking', {
-        sessionid: parseInt(sessionId),
+        sessionid: sid,
     });
     return response.data;
 };
 
 export const interruptTalk = async (sessionId: string) => {
+    const sid = Number(sessionId);
+    if (!Number.isInteger(sid) || sid <= 0) {
+        throw new Error(`Invalid sessionId: ${sessionId}`);
+    }
     return client.post('/interrupt_talk', {
-        sessionid: parseInt(sessionId),
+        sessionid: sid,
     });
 };
 

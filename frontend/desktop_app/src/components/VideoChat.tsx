@@ -55,6 +55,7 @@ export default function VideoChat() {
     }, [avatarId, navigate]);
 
     const [sessionId, setSessionId] = useState<string>('0');
+    const sessionIdRef = useRef<string>('0');
     const [isStarted, setIsStarted] = useState(false);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
     const [isChatOpen, setIsChatOpen] = useState(false);
@@ -110,6 +111,10 @@ export default function VideoChat() {
         conversationStateRef.current = conversationState;
         console.log('[State] Conversation state:', conversationState);
     }, [conversationState]);
+
+    useEffect(() => {
+        sessionIdRef.current = sessionId;
+    }, [sessionId]);
 
     // ========== 状态转换函数 ==========
     const setStateListening = () => {
@@ -685,6 +690,13 @@ export default function VideoChat() {
         if (!audioBlob || audioBlob.size < MIN_ASR_BLOB_BYTES) {
             return;
         }
+        const sid = Number(sessionIdRef.current);
+        if (!Number.isInteger(sid) || sid <= 0) {
+            return;
+        }
+        if (!isStarted) {
+            return;
+        }
 
         // 避免并发 ASR 请求导致“第一句后第二句丢失”
         if (asrRequestInFlightRef.current) {
@@ -1043,6 +1055,7 @@ export default function VideoChat() {
             });
 
             setSessionId(answer.sessionid);
+            sessionIdRef.current = answer.sessionid;
             await pc.setRemoteDescription(answer);
             setIsStarted(true);
             setIsLoading(false);
@@ -1086,12 +1099,19 @@ export default function VideoChat() {
         }
         setIsCameraOn(false);
         setIsStarted(false);
+        setSessionId('0');
+        sessionIdRef.current = '0';
     };
 
     const handleSendMessage = async (
         text: string,
         options?: { interrupt?: boolean; source?: 'user' | 'asr' }
     ) => {
+        const sid = Number(sessionIdRef.current);
+        if (!Number.isInteger(sid) || sid <= 0) {
+            console.warn('[CHAT] Skip send: invalid sessionId', sessionIdRef.current, { text, options });
+            return;
+        }
         const interrupt = options?.interrupt ?? true;
         resetTimer();
         setChatHistory(prev => [...prev, {
@@ -1104,7 +1124,7 @@ export default function VideoChat() {
         setStateLLMProcessing();
 
         try {
-            await sendHumanMessage(text, sessionId, interrupt);
+            await sendHumanMessage(text, String(sid), interrupt);
         } catch (e) {
             console.error(e);
             message.error('发送失败');

@@ -32,17 +32,25 @@ export const negotiateOffer = async (payload: OfferPayload): Promise<OfferRespon
 };
 
 export const sendHumanMessage = async (text: string, sessionId: string, interrupt: boolean = true) => {
+    const sid = Number(sessionId);
+    if (!Number.isInteger(sid) || sid <= 0) {
+        throw new Error(`Invalid sessionId: ${sessionId}`);
+    }
     return client.post('/human', {
         text,
         type: 'chat',
         interrupt,
-        sessionid: parseInt(sessionId),
+        sessionid: sid,
     });
 };
 
 export const isSpeaking = async (sessionId: string) => {
+    const sid = Number(sessionId);
+    if (!Number.isInteger(sid) || sid <= 0) {
+        throw new Error(`Invalid sessionId: ${sessionId}`);
+    }
     const response = await client.post('/is_speaking', {
-        sessionid: parseInt(sessionId),
+        sessionid: sid,
     });
     return response.data;
 };

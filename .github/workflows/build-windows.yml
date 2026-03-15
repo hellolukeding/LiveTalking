@@ -9,11 +9,12 @@ on:
         required: false
         default: ''
 
-  # 推送到 build-windows 或 wav2lip384 分支时触发，或推送 tag 时触发
+  # 推送到 build-windows、wav2lip384 或 feature/session-process-isolation 分支时触发，或推送 tag 时触发
   push:
     branches:
       - build-windows
       - wav2lip384
+      - feature/session-process-isolation
     tags:
       - 'v*'
 

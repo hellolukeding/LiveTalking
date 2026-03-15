@@ -316,6 +316,22 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                             self.drop_count += 1
                             break
 
+            def clear_audio_backlog(self):
+                if self._audio_local_queue is None:
+                    return
+                cleared = 0
+                while True:
+                    try:
+                        _v = self._audio_local_queue.get_nowait()
+                        del _v
+                        cleared += 1
+                    except queue.Empty:
+                        break
+                    except Exception:
+                        break
+                if cleared > 0:
+                    logger.info(f"[Session-{session_id}] Cleared local audio backlog: {cleared}")
+
             async def put(self, frame_data):
                 """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
                 try:
@@ -452,6 +468,11 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                         except Exception:
                             pass
                         try:
+                            if hasattr(fake_audio, "_queue") and hasattr(fake_audio._queue, "clear_audio_backlog"):
+                                fake_audio._queue.clear_audio_backlog()
+                        except Exception:
+                            pass
+                        try:
                             for _ in range(200):
                                 _v = video_queue.get_nowait()
                                 del _v
@@ -468,6 +489,11 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                             for _ in range(2000):
                                 _v = audio_queue.get_nowait()
                                 del _v
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(fake_audio, "_queue") and hasattr(fake_audio._queue, "clear_audio_backlog"):
+                                fake_audio._queue.clear_audio_backlog()
                         except Exception:
                             pass
                         # Drain video too, otherwise the client may keep rendering old mouth frames

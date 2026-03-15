@@ -132,6 +132,12 @@ class BaseReal:
         self._audio_out_started = False
         self._audio_out_thread = None
 
+        # Direct audio out path:
+        # - True: send TTS PCM directly to WebRTC audio queue in put_audio_frame()
+        #         to avoid coupling audio continuity to video inference latency.
+        # - False: keep legacy path (audio emitted from process_frames()).
+        self._direct_tts_audio_out = os.getenv("DIRECT_TTS_AUDIO_OUT", "true").lower() in ("1", "true", "yes", "on")
+
     @property
     def _render_quit_event(self):
         """Store render quit event for external access"""
@@ -293,6 +299,39 @@ class BaseReal:
             # Maintain real-time pacing (20ms per frame at 50fps).
             next_send_time = max(next_send_time + self._audio_out_period_s, time.perf_counter())
 
+    def _emit_audio_track_frame(self, pcm16: np.ndarray, datainfo: dict):
+        if self.opt.transport == 'virtualcam':
+            return
+        if pcm16.size <= 0:
+            return
+        if pcm16.dtype != np.int16:
+            pcm16 = pcm16.astype(np.int16, copy=False)
+
+        new_frame = AudioFrame(format='s16', layout='mono', samples=int(pcm16.shape[0]))
+        new_frame.planes[0].update(pcm16.tobytes())
+        new_frame.sample_rate = 16000
+
+        # Defer until track/loop is ready.
+        queue_loop = getattr(self, 'loop', None)
+        if not (hasattr(self, 'audio_track') and self.audio_track and queue_loop and queue_loop.is_running()):
+            with self._pending_audio_lock:
+                self._pending_audio.append((new_frame, datainfo or {}))
+                if len(self._pending_audio) > 600:
+                    self._pending_audio = self._pending_audio[-600:]
+            return
+
+        if self._audio_out_delay_s > 0:
+            self._enqueue_audio_out(new_frame, datainfo or {})
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.audio_track._queue.put((new_frame, datainfo or {})),
+                queue_loop,
+            )
+        except Exception as e:
+            logger.debug(f"[AUDIO_OUT] Failed to send direct audio frame: {e}")
+
     def send_custom_msg(self, msg):
         if self.datachannel:
             logger.info(
@@ -359,6 +398,19 @@ class BaseReal:
                 self.lip_asr.put_audio_frame(audio_chunk, datainfo)
             except Exception as e:
                 logger.debug(f"[BASE_REAL] LipASR put_audio_frame error: {e}")
+
+        # 直接音频输出：解耦音频播放与视频推理，避免推理抖动导致音频断续/丢帧。
+        if self._direct_tts_audio_out and self.opt.transport != 'virtualcam':
+            try:
+                pcm = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
+                if pcm.size <= 0:
+                    return
+                pcm = np.clip(pcm, -1.0, 1.0)
+                pcm16 = (pcm * 32767.0).astype(np.int16)
+                self._emit_audio_track_frame(pcm16, datainfo or {})
+                self.record_audio_data(pcm16)
+            except Exception as e:
+                logger.debug(f"[BASE_REAL] direct audio out error: {e}")
 
     def _flush_pending_audio(self):
         """尝试把缓冲区中的帧 flush 到音轨队列中。"""
@@ -811,6 +863,10 @@ class BaseReal:
             for audio_frame in audio_frames:
                 frame, type, eventpoint = audio_frame
                 frame = (frame * 32767).astype(np.int16)
+
+                # 直接音频输出模式下，WebRTC 音频已在 put_audio_frame() 发送，避免重复发送造成爆音/回声。
+                if self._direct_tts_audio_out and self.opt.transport != 'virtualcam':
+                    continue
 
                 if self.opt.transport == 'virtualcam':
                     audio_tmp.put(frame.tobytes())

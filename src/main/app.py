@@ -743,6 +743,7 @@ async def offer(request):
 
                 # 处理接收到的音频帧
                 async def process_audio_frames():
+                    upstream_notified = False
                     try:
                         while True:
                             frame = await track.recv()
@@ -766,6 +767,14 @@ async def offer(request):
                             orch = session_orchestrators.get(sessionid)
                             if orch:
                                 orch.ingest_audio(audio_array, sample_rate)
+                                if not upstream_notified:
+                                    upstream_notified = True
+                                    try:
+                                        nerfreal = nerfreals.get(sessionid)
+                                        if nerfreal:
+                                            nerfreal.send_custom_msg("ASR_UPSTREAM_READY")
+                                    except Exception as e:
+                                        logger.debug(f"[WEBRTC] Failed to send ASR_UPSTREAM_READY for session {sessionid}: {e}")
                     except Exception as e:
                         logger.error(
                             f"[WEBRTC] Error processing audio frames: {str(e)}")

@@ -38,6 +38,8 @@ interface ASRBuffer {
     timestamp: number;
 }
 
+const TTS_FALLBACK_TIMEOUT_MS = 2500;
+
 export default function VideoChat() {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
@@ -85,6 +87,10 @@ export default function VideoChat() {
     const asrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const asrBufferRef = useRef<ASRBuffer[]>([]);  // ASR 缓冲区
     const asrFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const asrRequestInFlightRef = useRef(false);
+    const asrQueuedBlobRef = useRef<Blob | null>(null);
+    const lastAsrResultRef = useRef<{ text: string; ts: number } | null>(null);
+    const lastAssistantSnapshotRef = useRef<{ text: string; ts: number } | null>(null);
 
     // 兼容旧的 isAISpeaking（用于UI显示）
     const isAISpeaking = conversationState === ConversationState.TTS_PLAYING;
@@ -99,19 +105,23 @@ export default function VideoChat() {
     const setStateListening = () => {
         console.log('[State] -> LISTENING (ASR enabled)');
         setConversationState(ConversationState.LISTENING);
-        
+
+        if (aiSpeakingTimeoutRef.current) {
+            clearTimeout(aiSpeakingTimeoutRef.current);
+            aiSpeakingTimeoutRef.current = null;
+        }
+        if (llmProcessingTimeoutRef.current) {
+            clearTimeout(llmProcessingTimeoutRef.current);
+            llmProcessingTimeoutRef.current = null;
+        }
+
         // 处理缓冲的音频（从LLM_PROCESSING或TTS_PLAYING状态转换过来时）
         if (asrBufferRef.current.length > 0) {
             const buffers = [...asrBufferRef.current];
             asrBufferRef.current = [];
-            console.log('[State] Processing buffered audio:', buffers.length, 'chunks');
-            
-            // 发送最大的音频片段（WebM不能简单合并）
-            const largestBuffer = buffers.reduce((max, b) => b.audioBlob.size > max.audioBlob.size ? b : max);
-            console.log('[State] Sending largest buffered audio:', largestBuffer.audioBlob.size, 'bytes');
-            
-            // 发送识别
-            sendAudioToBackend(largestBuffer.audioBlob);
+            const latestBuffer = buffers[buffers.length - 1];
+            console.log('[State] Processing buffered audio:', buffers.length, 'chunks, latest size:', latestBuffer.audioBlob.size);
+            sendAudioToBackend(latestBuffer.audioBlob);
         }
     };
     const setStateLLMProcessing = () => {
@@ -139,9 +149,9 @@ export default function VideoChat() {
             clearTimeout(aiSpeakingTimeoutRef.current);
         }
         aiSpeakingTimeoutRef.current = setTimeout(() => {
-            console.log('[State] AI stopped speaking (timeout 1s)');
+            console.log('[State] AI stopped speaking (fallback timeout)');
             setStateListening();
-        }, 1000);
+        }, TTS_FALLBACK_TIMEOUT_MS);
     };
 
     const extendTTSPlaying = () => {
@@ -151,9 +161,9 @@ export default function VideoChat() {
                 clearTimeout(aiSpeakingTimeoutRef.current);
             }
             aiSpeakingTimeoutRef.current = setTimeout(() => {
-                console.log('[State] AI stopped speaking (timeout 1s after extend)');
+                console.log('[State] AI stopped speaking (fallback timeout after extend)');
                 setStateListening();
-            }, 1000);
+            }, TTS_FALLBACK_TIMEOUT_MS);
         }
     };
 
@@ -173,18 +183,64 @@ export default function VideoChat() {
     }, []);
 
     // ========== ASR 缓冲区管理 ==========
-    const flushASRBuffer = async () => {
+    const MIN_ASR_BLOB_BYTES = 320;
+    const ASR_DUPLICATE_WINDOW_MS = 2500;
+    const ASR_ECHO_GUARD_WINDOW_MS = 5000;
+
+    const normalizeText = (text: string): string =>
+        text
+            .toLowerCase()
+            .replace(/[\s，。！？、,.!?;:：；"'“”‘’（）()【】\[\]-]/g, '')
+            .trim();
+
+    const blobToBase64 = (audioBlob: Blob): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                try {
+                    const base64 = (reader.result as string).split(',')[1];
+                    resolve(base64);
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(audioBlob);
+        });
+    };
+
+    const flushASRBuffer = () => {
         if (asrBufferRef.current.length === 0) return;
 
-        console.log('[ASR] Flushing buffer, count:', asrBufferRef.current.length);
         const buffers = [...asrBufferRef.current];
         asrBufferRef.current = [];
+        const latestBuffer = buffers[buffers.length - 1];
+        console.log('[ASR] Flushing buffered audio:', buffers.length, 'chunks, latest:', latestBuffer.audioBlob.size, 'bytes');
+        sendAudioToBackend(latestBuffer.audioBlob);
+    };
 
-        // 只处理最近的音频（避免处理太多旧的音频）
-        if (buffers.length > 0) {
-            const latestBuffer = buffers[buffers.length - 1];
-            await sendAudioToBackend(latestBuffer.audioBlob);
+    const isLikelyEchoFromAssistant = (text: string): boolean => {
+        const current = normalizeText(text);
+        if (!current || current.length < 4) {
+            return false;
         }
+
+        const last = lastAssistantSnapshotRef.current;
+        if (!last) {
+            return false;
+        }
+
+        const ageMs = Date.now() - last.ts;
+        if (ageMs > ASR_ECHO_GUARD_WINDOW_MS) {
+            return false;
+        }
+
+        const assistant = normalizeText(last.text);
+        if (!assistant || assistant.length < 4) {
+            return false;
+        }
+
+        return assistant.includes(current) || current.includes(assistant);
     };
 
     // 格式化通话时长
@@ -383,18 +439,18 @@ export default function VideoChat() {
                             clearTimeout(asrFlushTimerRef.current);
                         }
                         
-                        // 设置新的静音检测定时器（1000ms无新音频则发送识别）
-                        asrFlushTimerRef.current = setTimeout(async () => {
+                        // 设置新的静音检测定时器（短间隔，降低交互延迟）
+                        asrFlushTimerRef.current = setTimeout(() => {
                             if (asrBufferRef.current.length > 0) {
                                 const buffers = [...asrBufferRef.current];
                                 asrBufferRef.current = [];
-                                
-                                // 发送最大的音频片段（而不是合并，因为WebM不能简单拼接）
-                                const largestBuffer = buffers.reduce((max, b) => b.audioBlob.size > max.audioBlob.size ? b : max);
-                                console.log('[ASR] Silence detected, sending largest audio:', largestBuffer.audioBlob.size, 'bytes from', buffers.length, 'chunks');
-                                await sendAudioToBackend(largestBuffer.audioBlob);
+
+                                // 发送最近片段，避免“选最大片段”导致下一句被旧音频覆盖
+                                const latestBuffer = buffers[buffers.length - 1];
+                                console.log('[ASR] Silence detected, sending latest audio:', latestBuffer.audioBlob.size, 'bytes from', buffers.length, 'chunks');
+                                sendAudioToBackend(latestBuffer.audioBlob);
                             }
-                        }, 500);
+                        }, 350);
                         
                     } else if (conversationStateRef.current === ConversationState.LLM_PROCESSING ||
                                conversationStateRef.current === ConversationState.TTS_PLAYING) {
@@ -404,8 +460,8 @@ export default function VideoChat() {
                             audioBlob: audioBlob,
                             timestamp: Date.now()
                         });
-                        // 限制缓冲区大小（最多保存10个片段）
-                        if (asrBufferRef.current.length > 10) {
+                        // 限制缓冲区大小（保留更多近期片段）
+                        if (asrBufferRef.current.length > 20) {
                             asrBufferRef.current.shift();
                         }
                     }
@@ -414,13 +470,9 @@ export default function VideoChat() {
 
                 // 如果仍在运行，重新开始录音（除非正在被停止）
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && isVoiceChatOn) {
-                    // 延迟一点再开始，避免连续录制
-                    setTimeout(() => {
-                        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-                            recordingChunks = [];
-                            mediaRecorderRef.current.start();
-                        }
-                    }, 100);
+                    // 立即续录，减少 stop/start 间隔造成的漏字
+                    recordingChunks = [];
+                    mediaRecorderRef.current.start();
                 }
             };
 
@@ -439,12 +491,12 @@ export default function VideoChat() {
             // 第一次开始录音
             startRecording();
 
-            // 每 2 秒停止录音（触发 onstop，然后自动重新开始）
+            // 缩短切片周期，降低识别延迟并减少漏词
             asrIntervalRef.current = setInterval(() => {
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
                     mediaRecorderRef.current.stop();
                 }
-            }, 2000);
+            }, 1200);
 
             // 设置初始状态为 LISTENING
             setStateListening();
@@ -458,46 +510,74 @@ export default function VideoChat() {
         }
     };
 
-    // 发送音频到后端
-    const sendAudioToBackend = async (audioBlob: Blob) => {
-        try {
-            // 转换为 base64
-            const reader = new FileReader();
-            reader.onloadend = async () => {
-                try {
-                    const base64Audio = (reader.result as string).split(',')[1];
-                    // Debug: 检查 base64 的前几个字符
-                    console.log('[ASR] Base64 first 20 chars:', base64Audio?.substring(0, 20));
-
-                    // 发送到后端 - 使用 LiveTalking API 配置
-                    const apiBaseUrl = getApiBaseUrl();
-                    const response = await fetch(`${apiBaseUrl}/speech_recognize`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ audio: base64Audio }),
-                    });
-
-                    const result = await response.json();
-
-                    if (result.code === 0 && result.data?.text) {
-                        const text = result.data.text.trim();
-                        if (text) {
-                            console.log('[ASR] Tencent ASR recognized:', text);
-                            handleSendMessage(text);
-                        }
-                    } else if (result.code !== 0) {
-                        console.warn('[ASR] Recognition failed:', result.msg);
-                    }
-                } catch (e) {
-                    console.error('[ASR] Failed to process recognition result:', e);
-                }
-            };
-            reader.readAsDataURL(audioBlob);
-        } catch (e) {
-            console.error('[ASR] Failed to send audio for recognition:', e);
+    const recognizeAudioBlob = async (audioBlob: Blob): Promise<string | null> => {
+        if (!audioBlob || audioBlob.size < MIN_ASR_BLOB_BYTES) {
+            return null;
         }
+        try {
+            const base64Audio = await blobToBase64(audioBlob);
+            const apiBaseUrl = getApiBaseUrl();
+            const response = await fetch(`${apiBaseUrl}/speech_recognize`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ audio: base64Audio }),
+            });
+
+            const result = await response.json();
+            if (result.code !== 0) {
+                console.warn('[ASR] Recognition failed:', result.msg);
+                return null;
+            }
+
+            const text = String(result.data?.text || '').trim();
+            return text || null;
+        } catch (e) {
+            console.error('[ASR] Failed to recognize audio:', e);
+            return null;
+        }
+    };
+
+    // 发送音频到后端（带串行队列，避免并发请求相互覆盖）
+    const sendAudioToBackend = (audioBlob: Blob) => {
+        if (!audioBlob || audioBlob.size < MIN_ASR_BLOB_BYTES) {
+            return;
+        }
+
+        // 避免并发 ASR 请求导致“第一句后第二句丢失”
+        if (asrRequestInFlightRef.current) {
+            asrQueuedBlobRef.current = audioBlob;
+            return;
+        }
+
+        asrRequestInFlightRef.current = true;
+        (async () => {
+            try {
+                const text = await recognizeAudioBlob(audioBlob);
+                if (text) {
+                    const now = Date.now();
+                    const last = lastAsrResultRef.current;
+                    if (last && last.text === text && now - last.ts < ASR_DUPLICATE_WINDOW_MS) {
+                        return;
+                    }
+                    if (isLikelyEchoFromAssistant(text)) {
+                        console.log('[ASR] Dropped likely echo from assistant:', text);
+                        return;
+                    }
+                    lastAsrResultRef.current = { text, ts: now };
+                    console.log('[ASR] Tencent ASR recognized:', text);
+                    await handleSendMessage(text, { interrupt: false, source: 'asr' });
+                }
+            } finally {
+                asrRequestInFlightRef.current = false;
+                const queuedBlob = asrQueuedBlobRef.current;
+                asrQueuedBlobRef.current = null;
+                if (queuedBlob) {
+                    setTimeout(() => sendAudioToBackend(queuedBlob), 0);
+                }
+            }
+        })();
     };
 
     // 发送音频到后端进行识别（保留这个函数以防被其他地方调用）
@@ -508,10 +588,19 @@ export default function VideoChat() {
             flushASRBuffer();
         }
 
+        asrRequestInFlightRef.current = false;
+        asrQueuedBlobRef.current = null;
+        lastAsrResultRef.current = null;
+        lastAssistantSnapshotRef.current = null;
+
         // 停止定时器
         if (asrIntervalRef.current) {
             clearInterval(asrIntervalRef.current);
             asrIntervalRef.current = null;
+        }
+        if (asrFlushTimerRef.current) {
+            clearTimeout(asrFlushTimerRef.current);
+            asrFlushTimerRef.current = null;
         }
 
         // 停止录音
@@ -559,6 +648,27 @@ export default function VideoChat() {
         }
     };
 
+    const appendAssistantText = (textChunk: string) => {
+        const text = (textChunk || '').trim();
+        if (!text) return;
+        markAISpeaking();
+        lastAssistantSnapshotRef.current = { text: textChunk, ts: Date.now() };
+        setChatHistory(prev => {
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant') {
+                return [
+                    ...prev.slice(0, -1),
+                    { ...lastMsg, content: lastMsg.content + textChunk }
+                ];
+            }
+            return [...prev, {
+                role: 'assistant' as const,
+                content: textChunk,
+                timestamp: Date.now()
+            }];
+        });
+    };
+
     const start = async () => {
         if (isStarted || isLoading) return;
 
@@ -597,49 +707,35 @@ export default function VideoChat() {
 
         const dc = pc.createDataChannel("chat");
         dc.onmessage = (event) => {
-            const data = event.data;
-            if (!data) return;
+            const raw = typeof event.data === 'string' ? event.data : String(event.data ?? '');
+            if (!raw) return;
 
-            // 尝试解析为 JSON（处理 eventpoint 信号）
-            try {
-                const parsed = JSON.parse(data);
-                // TTS 完成信号
-                if (parsed.status === 'end') {
-                    console.log('[DataChannel] Received TTS end signal:', parsed);
-                    // 清除超时定时器并转换到 LISTENING 状态
-                    if (aiSpeakingTimeoutRef.current) {
-                        clearTimeout(aiSpeakingTimeoutRef.current);
-                        aiSpeakingTimeoutRef.current = null;
+            // 优先处理 JSON eventpoint（TTS start/end）
+            if (raw.startsWith('{') && raw.endsWith('}')) {
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (parsed && typeof parsed === 'object') {
+                        if (parsed.status === 'start') {
+                            markAISpeaking();
+                            return;
+                        }
+                        if (parsed.status === 'end') {
+                            console.log('[DataChannel] Received TTS end signal:', parsed);
+                            setStateListening();
+                            return;
+                        }
                     }
-                    setStateListening();
-                    return;
+                } catch {
+                    // 非 JSON 文本，按普通消息处理
                 }
-            } catch {
-                // 不是 JSON，当作普通文本处理
             }
 
-            // 普通文本消息（AI回复）
-            const text = data;
-            // 每次收到AI消息时，标记AI正在说话
-            markAISpeaking();
+            // ASR_RESULT 属于状态/调试消息，不应追加到 assistant 回复
+            if (raw.startsWith('ASR_RESULT:')) {
+                return;
+            }
 
-            setChatHistory(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.role === 'assistant') {
-                    const updated = [
-                        ...prev.slice(0, -1),
-                        { ...lastMsg, content: lastMsg.content + text }
-                    ];
-                    return updated;
-                } else {
-                    const newMessage = {
-                        role: 'assistant' as const,
-                        content: text,
-                        timestamp: Date.now()
-                    };
-                    return [...prev, newMessage];
-                }
-            });
+            appendAssistantText(raw);
         };
 
         pc.addEventListener('track', (evt) => {
@@ -720,7 +816,11 @@ export default function VideoChat() {
         setIsStarted(false);
     };
 
-    const handleSendMessage = async (text: string) => {
+    const handleSendMessage = async (
+        text: string,
+        options?: { interrupt?: boolean; source?: 'user' | 'asr' }
+    ) => {
+        const interrupt = options?.interrupt ?? true;
         resetTimer();
         setChatHistory(prev => [...prev, {
             role: 'user',
@@ -732,7 +832,7 @@ export default function VideoChat() {
         setStateLLMProcessing();
 
         try {
-            await sendHumanMessage(text, sessionId);
+            await sendHumanMessage(text, sessionId, interrupt);
         } catch (e) {
             console.error(e);
             message.error('发送失败');

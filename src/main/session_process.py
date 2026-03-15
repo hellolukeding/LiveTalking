@@ -266,9 +266,9 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                 # Audio overflow dropping must keep A/V aligned (2 audio chunks per 1 video frame @ 25fps).
                 self._audio_overflow_drops = 0
                 try:
-                    self.audio_put_timeout_s = float(os.getenv("AUDIO_QUEUE_PUT_TIMEOUT_MS", "1000")) / 1000.0
+                    self.audio_put_timeout_s = float(os.getenv("AUDIO_QUEUE_PUT_TIMEOUT_MS", "1500")) / 1000.0
                 except Exception:
-                    self.audio_put_timeout_s = 1.0
+                    self.audio_put_timeout_s = 1.5
 
             async def put(self, frame_data):
                 """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
@@ -282,6 +282,12 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                     # 序列化帧
                     if self.frame_type == 'audio':
                         serialized = serialize_audio_frame(frame)
+                        # 在进程隔离模式下保留 eventpoint（用于主进程 datachannel 状态同步）
+                        if eventpoint is not None:
+                            serialized = {
+                                "frame": serialized,
+                                "eventpoint": eventpoint,
+                            }
                     else:
                         serialized = serialize_video_frame(frame)
 

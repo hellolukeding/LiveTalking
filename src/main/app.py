@@ -125,9 +125,37 @@ class SubprocessNerfrealProxy:
         self._session = session
         self.avatar_name = avatar_name
         self.voice_id = voice_id
+        self.datachannel = None
+        self.loop = None
+
+    def send_custom_msg(self, msg):
+        ch = getattr(self, "datachannel", None)
+        if not ch:
+            return
+        try:
+            if ch.readyState != "open":
+                return
+        except Exception:
+            return
+
+        def _send():
+            try:
+                ch.send(msg)
+            except Exception as e:
+                logger.debug(f"[Proxy] Failed to send datachannel msg: {e}")
+
+        try:
+            loop = getattr(self, "loop", None)
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(_send)
+            else:
+                _send()
+        except Exception:
+            pass
 
     def put_msg_txt(self, msg, datainfo: dict = {}):
         try:
+            self.send_custom_msg(msg)
             if not self._session or not getattr(self._session, "command_queue", None):
                 return
             self._session.command_queue.put(
@@ -666,6 +694,32 @@ async def offer(request):
                 orch = session_orchestrators.get(sessionid)
                 if orch:
                     orch.set_datachannel(channel, asyncio.get_event_loop())
+
+                # 进程隔离模式下，音轨事件点不会自动触发 notify，需要在主进程桥接到 datachannel
+                if USE_PROCESS_ISOLATION:
+                    player = webrtc_players.get(sessionid)
+                    audio_track = getattr(player, "audio", None) if player else None
+                    if audio_track and hasattr(audio_track, "set_event_notifier"):
+                        def _eventpoint_notifier(eventpoint):
+                            if not eventpoint:
+                                return
+                            try:
+                                if channel.readyState != "open":
+                                    return
+                                if isinstance(eventpoint, dict):
+                                    safe_eventpoint = {
+                                        k: v for k, v in eventpoint.items()
+                                        if isinstance(v, (str, int, float, bool, type(None)))
+                                    }
+                                    payload = json.dumps(safe_eventpoint, ensure_ascii=False)
+                                else:
+                                    payload = json.dumps({"status": str(eventpoint)}, ensure_ascii=False)
+                                channel.send(payload)
+                            except Exception as e:
+                                logger.debug(f"[WEBRTC] Eventpoint notify failed for session {sessionid}: {e}")
+
+                        audio_track.set_event_notifier(_eventpoint_notifier)
+                        logger.debug(f"[WEBRTC] Eventpoint notifier attached for session {sessionid}")
             except Exception as e:
                 logger.error(
                     f"[WEBRTC] Failed to initialize data channel: {str(e)}")

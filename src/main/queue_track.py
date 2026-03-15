@@ -6,11 +6,12 @@ import logging
 import fractions
 import time
 import os
+import json
 import numpy as np
 from collections import deque
 from av import AudioFrame, VideoFrame
 from aiortc import MediaStreamTrack
-from typing import Optional, Set
+from typing import Any, Callable, Optional, Set
 import multiprocessing
 import queue as std_queue
 
@@ -26,6 +27,10 @@ DEFAULT_VIDEO_PTS_STEP = int(VIDEO_CLOCK_RATE / DEFAULT_VIDEO_FPS)  # 3600 @ 25f
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
 DEFAULT_AUDIO_SAMPLES = int(DEFAULT_AUDIO_SAMPLE_RATE * 0.020)  # 20ms -> 320
 DEFAULT_AUDIO_JITTER_WAIT_S = float(os.getenv("AUDIO_JITTER_WAIT_MS", "10")) / 1000.0
+DEFAULT_AUDIO_JITTER_MAX_S = float(os.getenv("AUDIO_JITTER_MAX_MS", "180")) / 1000.0
+DEFAULT_AUDIO_JITTER_MULT = float(os.getenv("AUDIO_JITTER_MULT", "4.0"))
+DEFAULT_AUDIO_LOCAL_BUF_TARGET = int(os.getenv("AUDIO_LOCAL_BUF_TARGET", "8"))
+DEFAULT_AUDIO_START_PREROLL_S = float(os.getenv("AUDIO_START_PREROLL_MS", "120")) / 1000.0
 DEFAULT_VIDEO_JITTER_WAIT_S = float(os.getenv("VIDEO_JITTER_WAIT_MS", "20")) / 1000.0
 
 
@@ -72,11 +77,18 @@ class QueueAudioTrack(MediaStreamTrack):
     """从队列读取音频的 WebRTC 轨道 - 支持序列化数据"""
     kind = "audio"
 
-    def __init__(self, queue: multiprocessing.Queue, session_id: str, clock: Optional[AVSyncClock] = None):
+    def __init__(
+        self,
+        queue: multiprocessing.Queue,
+        session_id: str,
+        clock: Optional[AVSyncClock] = None,
+        event_notifier: Optional[Callable[[dict], None]] = None,
+    ):
         super().__init__()
         self.queue = queue
         self.session_id = session_id
         self.clock = clock or AVSyncClock()
+        self._event_notifier = event_notifier
         self._timestamp = 0  # in samples
         self._start_time: Optional[float] = None
         self._stopped = False
@@ -89,8 +101,39 @@ class QueueAudioTrack(MediaStreamTrack):
         # Small local buffer to absorb mp.Queue scheduling jitter.
         self._local_buf: deque = deque()
         self._last_good_frame_data = None
+        self._preroll_done = False
 
         logger.info(f"[QueueAudioTrack] Created for session {session_id}")
+
+    def set_event_notifier(self, notifier: Optional[Callable[[dict], None]]):
+        self._event_notifier = notifier
+
+    def _split_audio_payload(self, frame_data: Any) -> tuple[Any, Optional[dict]]:
+        """
+        Backward-compatible payload format:
+        - legacy: serialized frame dict
+        - new: {"frame": serialized_frame_dict, "eventpoint": {...}}
+        """
+        if isinstance(frame_data, dict) and "frame" in frame_data and isinstance(frame_data.get("frame"), dict):
+            return frame_data.get("frame"), frame_data.get("eventpoint")
+        return frame_data, None
+
+    def _notify_eventpoint(self, eventpoint: Optional[dict]):
+        if not eventpoint:
+            return
+        notifier = self._event_notifier
+        if not notifier:
+            return
+        try:
+            notifier(eventpoint)
+        except Exception as e:
+            try:
+                logger.debug(
+                    f"[QueueAudioTrack] Eventpoint notify failed for session {self.session_id}: "
+                    f"{json.dumps(eventpoint, ensure_ascii=False)} err={e}"
+                )
+            except Exception:
+                logger.debug(f"[QueueAudioTrack] Eventpoint notify failed for session {self.session_id}: {e}")
 
     def _make_silence(self) -> AudioFrame:
         samples = int(self._frame_samples or DEFAULT_AUDIO_SAMPLES)
@@ -133,6 +176,20 @@ class QueueAudioTrack(MediaStreamTrack):
         except std_queue.Empty:
             return False, None
 
+    async def _prime_local_buffer(self):
+        if self._preroll_done:
+            return
+        deadline = time.perf_counter() + max(0.0, DEFAULT_AUDIO_START_PREROLL_S)
+        while len(self._local_buf) < max(1, DEFAULT_AUDIO_LOCAL_BUF_TARGET // 2):
+            remain = deadline - time.perf_counter()
+            if remain <= 0:
+                break
+            got, item = await self._try_get_frame_data(timeout_s=min(0.02, remain))
+            if not got:
+                break
+            self._local_buf.append(item)
+        self._preroll_done = True
+
     async def recv(self):
         """接收下一帧"""
         if self._stopped:
@@ -142,6 +199,7 @@ class QueueAudioTrack(MediaStreamTrack):
         if self._start_time is None:
             self._start_time = await self.clock.mark_ready_and_wait(self.kind)
             self._timestamp = 0
+            await self._prime_local_buffer()
 
         # Pace to the wall clock based on the RTP timestamp we are about to emit.
         # NOTE: aiortc sends as fast as recv() returns; pacing here prevents burst-send then starvation.
@@ -154,7 +212,7 @@ class QueueAudioTrack(MediaStreamTrack):
 
         # Drain a few items quickly to smooth out mp.Queue jitter.
         # Do NOT drain unboundedly: it can increase latency.
-        while len(self._local_buf) < 3:
+        while len(self._local_buf) < max(1, DEFAULT_AUDIO_LOCAL_BUF_TARGET):
             got, item = await self._try_get_frame_data(timeout_s=0)
             if not got:
                 break
@@ -168,14 +226,19 @@ class QueueAudioTrack(MediaStreamTrack):
         else:
             # If producer is slightly late, wait up to ~one frame period before declaring underflow.
             frame_period_s = float(self._frame_samples) / float(self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
-            # Use up to ~2 frame periods to absorb bursty producer writes and reduce periodic stutter.
-            jitter_wait_s = max(DEFAULT_AUDIO_JITTER_WAIT_S, min(frame_period_s * 2.0, 0.08))
+            # Use up to ~3 frame periods to absorb bursty producer writes and reduce periodic stutter.
+            jitter_wait_s = max(
+                DEFAULT_AUDIO_JITTER_WAIT_S,
+                min(frame_period_s * DEFAULT_AUDIO_JITTER_MULT, DEFAULT_AUDIO_JITTER_MAX_S),
+            )
             got_item, frame_data = await self._try_get_frame_data(timeout_s=jitter_wait_s)
 
         if got_item and frame_data is None:
             logger.info(f"[QueueAudioTrack] Session {self.session_id} received end signal")
             self._stopped = True
             raise StopIteration
+
+        eventpoint = None
 
         if not got_item:
             # Fallback: producer stalled. Output silence to keep the track alive, but match stream cadence.
@@ -197,20 +260,22 @@ class QueueAudioTrack(MediaStreamTrack):
             if audio_frame is None:
                 audio_frame = self._make_silence()
         else:
+            frame_payload, eventpoint = self._split_audio_payload(frame_data)
             try:
-                audio_frame = deserialize_audio_frame(frame_data)
-                self._last_good_frame_data = frame_data
+                audio_frame = deserialize_audio_frame(frame_payload)
+                self._last_good_frame_data = frame_payload
             except Exception as e:
                 logger.error(f"[QueueAudioTrack] Failed to deserialize audio frame: {e}")
                 sample_rate = None
                 try:
-                    sample_rate = frame_data.get("sample_rate")
+                    sample_rate = frame_payload.get("sample_rate")
                 except Exception:
                     sample_rate = None
                 sample_rate = int(sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
                 self._sample_rate = sample_rate
                 audio_frame = self._make_silence()
 
+        self._notify_eventpoint(eventpoint)
         self._update_stream_hints(audio_frame)
         sample_rate = int(getattr(audio_frame, "sample_rate", None) or self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
 

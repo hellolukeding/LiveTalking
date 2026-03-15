@@ -30,6 +30,8 @@ DEFAULT_AUDIO_JITTER_WAIT_S = float(os.getenv("AUDIO_JITTER_WAIT_MS", "10")) / 1
 DEFAULT_AUDIO_JITTER_MAX_S = float(os.getenv("AUDIO_JITTER_MAX_MS", "180")) / 1000.0
 DEFAULT_AUDIO_JITTER_MULT = float(os.getenv("AUDIO_JITTER_MULT", "4.0"))
 DEFAULT_AUDIO_LOCAL_BUF_TARGET = int(os.getenv("AUDIO_LOCAL_BUF_TARGET", "8"))
+DEFAULT_AUDIO_LOCAL_BUF_MAX = int(os.getenv("AUDIO_LOCAL_BUF_MAX", "24"))
+DEFAULT_AUDIO_BUF_RECOVER_FRAMES = int(os.getenv("AUDIO_BUF_RECOVER_FRAMES", "180"))
 DEFAULT_AUDIO_START_PREROLL_S = float(os.getenv("AUDIO_START_PREROLL_MS", "120")) / 1000.0
 DEFAULT_AUDIO_UNDERFLOW_HOLD_LAST = os.getenv("AUDIO_UNDERFLOW_HOLD_LAST", "false").lower() in ("1", "true", "yes", "on")
 DEFAULT_VIDEO_JITTER_WAIT_S = float(os.getenv("VIDEO_JITTER_WAIT_MS", "20")) / 1000.0
@@ -101,6 +103,9 @@ class QueueAudioTrack(MediaStreamTrack):
         self._last_underflow_log = 0.0
         # Small local buffer to absorb mp.Queue scheduling jitter.
         self._local_buf: deque = deque()
+        self._local_buf_target = max(1, DEFAULT_AUDIO_LOCAL_BUF_TARGET)
+        self._local_buf_max = max(self._local_buf_target, DEFAULT_AUDIO_LOCAL_BUF_MAX)
+        self._stable_recv_frames = 0
         self._last_good_frame_data = None
         self._preroll_done = False
         self._hold_last_on_underflow = DEFAULT_AUDIO_UNDERFLOW_HOLD_LAST
@@ -182,7 +187,7 @@ class QueueAudioTrack(MediaStreamTrack):
         if self._preroll_done:
             return
         deadline = time.perf_counter() + max(0.0, DEFAULT_AUDIO_START_PREROLL_S)
-        while len(self._local_buf) < max(1, DEFAULT_AUDIO_LOCAL_BUF_TARGET // 2):
+        while len(self._local_buf) < max(1, self._local_buf_target // 2):
             remain = deadline - time.perf_counter()
             if remain <= 0:
                 break
@@ -214,7 +219,7 @@ class QueueAudioTrack(MediaStreamTrack):
 
         # Drain a few items quickly to smooth out mp.Queue jitter.
         # Do NOT drain unboundedly: it can increase latency.
-        while len(self._local_buf) < max(1, DEFAULT_AUDIO_LOCAL_BUF_TARGET):
+        while len(self._local_buf) < max(1, self._local_buf_target):
             got, item = await self._try_get_frame_data(timeout_s=0)
             if not got:
                 break
@@ -245,12 +250,15 @@ class QueueAudioTrack(MediaStreamTrack):
         if not got_item:
             # Fallback: producer stalled. Output silence to keep the track alive, but match stream cadence.
             self._underflow_count += 1
+            self._stable_recv_frames = 0
+            if self._local_buf_target < self._local_buf_max:
+                self._local_buf_target = min(self._local_buf_max, self._local_buf_target + 2)
             tnow = time.perf_counter()
             if tnow - self._last_underflow_log >= 5.0:
                 self._last_underflow_log = tnow
                 logger.warning(
                     f"[QueueAudioTrack] Session {self.session_id} underflow x{self._underflow_count} "
-                    f"(sr={self._sample_rate}, samples={self._frame_samples})"
+                    f"(sr={self._sample_rate}, samples={self._frame_samples}, local_target={self._local_buf_target})"
                 )
             # Underflow strategy:
             # - default: output silence (avoid repeated-phoneme "卡顿感")
@@ -264,6 +272,10 @@ class QueueAudioTrack(MediaStreamTrack):
             if audio_frame is None:
                 audio_frame = self._make_silence()
         else:
+            self._stable_recv_frames += 1
+            if self._local_buf_target > DEFAULT_AUDIO_LOCAL_BUF_TARGET and self._stable_recv_frames >= max(30, DEFAULT_AUDIO_BUF_RECOVER_FRAMES):
+                self._local_buf_target -= 1
+                self._stable_recv_frames = 0
             frame_payload, eventpoint = self._split_audio_payload(frame_data)
             try:
                 audio_frame = deserialize_audio_frame(frame_payload)

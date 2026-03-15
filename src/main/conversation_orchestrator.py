@@ -52,40 +52,44 @@ class VADConfig:
     sample_rate_out: int = 16000
     # VAD thresholds are RMS in [0,1]. Defaults bias slightly towards sensitivity;
     # a noise-adaptive floor (below) helps avoid false triggers in noisy rooms.
-    rms_speech: float = 0.006
-    rms_barge_in: float = 0.010
-    end_silence_ms: int = 400
-    min_utterance_ms: int = 350
+    rms_speech: float = 0.0045
+    rms_barge_in: float = 0.008
+    rms_continue_ratio: float = 0.65
+    end_silence_ms: int = 300
+    min_utterance_ms: int = 240
     max_utterance_ms: int = 8000
-    cooldown_ms: int = 500
-    dedup_window_ms: int = 3000
-    barge_in_ms: int = 120
+    cooldown_ms: int = 180
+    dedup_window_ms: int = 1500
+    barge_in_ms: int = 90
     barge_in_preroll_ms: int = 320
     enable_orchestrator: bool = True
     noise_adapt: bool = True
     noise_alpha: float = 0.05
-    noise_multiplier: float = 3.0
-    noise_margin: float = 0.0015
+    noise_multiplier: float = 2.5
+    noise_margin: float = 0.0010
+    noise_max_factor: float = 2.8
     debug_rms: bool = False
 
     @classmethod
     def from_env(cls) -> "VADConfig":
         return cls(
             sample_rate_out=_env_int("ORCH_ASR_SR", 16000),
-            rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.006),
-            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.010),
-            end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 400),
-            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 350),
+            rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.0045),
+            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.008),
+            rms_continue_ratio=_env_float("ORCH_VAD_RMS_CONTINUE_RATIO", 0.65),
+            end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 300),
+            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 240),
             max_utterance_ms=_env_int("ORCH_VAD_MAX_UTTERANCE_MS", 8000),
-            cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 500),
-            dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 3000),
-            barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 120),
+            cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 180),
+            dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 1500),
+            barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 90),
             barge_in_preroll_ms=_env_int("ORCH_BARGE_IN_PREROLL_MS", 320),
             enable_orchestrator=_env_bool("ORCH_ENABLED", True),
             noise_adapt=_env_bool("ORCH_VAD_NOISE_ADAPT", True),
             noise_alpha=_env_float("ORCH_VAD_NOISE_ALPHA", 0.05),
-            noise_multiplier=_env_float("ORCH_VAD_NOISE_MULT", 3.0),
-            noise_margin=_env_float("ORCH_VAD_NOISE_MARGIN", 0.0015),
+            noise_multiplier=_env_float("ORCH_VAD_NOISE_MULT", 2.5),
+            noise_margin=_env_float("ORCH_VAD_NOISE_MARGIN", 0.0010),
+            noise_max_factor=_env_float("ORCH_VAD_NOISE_MAX_FACTOR", 2.8),
             debug_rms=_env_bool("ORCH_VAD_DEBUG", False),
         )
 
@@ -232,18 +236,29 @@ class ConversationOrchestrator:
         thr_barge = float(self.cfg.rms_barge_in)
         if self.cfg.noise_adapt and self._noise_rms is not None:
             floor = float(self._noise_rms)
-            thr_speech = max(thr_speech, floor * float(self.cfg.noise_multiplier) + float(self.cfg.noise_margin))
+            dynamic_thr = floor * float(self.cfg.noise_multiplier) + float(self.cfg.noise_margin)
+            max_thr = base_thr_speech * float(self.cfg.noise_max_factor)
+            if max_thr > 0:
+                dynamic_thr = min(dynamic_thr, max_thr)
+            thr_speech = max(thr_speech, dynamic_thr)
             thr_barge = max(thr_barge, thr_speech * 1.6)
+        continue_thr = max(0.0001, thr_speech * float(self.cfg.rms_continue_ratio))
 
         if self.cfg.debug_rms and (now - self._last_debug_time) >= 1.0:
             self._last_debug_time = now
             logger.info(
-                f"[ORCH-{self.session_id}] rms={rms:.4f} thr_speech={thr_speech:.4f} thr_barge={thr_barge:.4f} "
+                f"[ORCH-{self.session_id}] rms={rms:.4f} thr_speech={thr_speech:.4f} thr_continue={continue_thr:.4f} thr_barge={thr_barge:.4f} "
                 f"noise={None if self._noise_rms is None else f'{self._noise_rms:.4f}'} "
                 f"in_speech={self._in_speech} tts={speaking}"
             )
 
         if speaking:
+            # If we already interrupted and started collecting a user turn, do not repeatedly re-interrupt.
+            if self._in_speech:
+                if rms >= continue_thr:
+                    self._append_audio(mono, sr)
+                    self._last_voice_time = now
+                return
             # While TTS is speaking, ignore mic audio unless barge-in is detected.
             if rms >= thr_barge:
                 if self._barge_in_started_time is None:
@@ -269,7 +284,7 @@ class ConversationOrchestrator:
 
         self._reset_barge_in_state()
 
-        is_voice = rms >= thr_speech
+        is_voice = rms >= (continue_thr if self._in_speech else thr_speech)
         if is_voice:
             if not self._in_speech:
                 self._begin_speech(now, sr)

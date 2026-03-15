@@ -1854,7 +1854,7 @@ if __name__ == '__main__':
                         help="Video codec preference (default: auto)")
 
     # musetalk opt
-    parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
+    parser.add_argument('--avatar_id', type=str, default='wav2lip384_avatar1',
                         help="define which avatar in data/avatars")
     # parser.add_argument('--bbox_shift', type=int, default=5)
     parser.add_argument('--batch_size', type=int,
@@ -1895,6 +1895,18 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     opt = args
+
+    # Wav2Lip 音频帧率安全兜底：
+    # 该链路默认按 20ms 音频帧（50fps）设计，非50会显著增加音频卡顿/掉帧风险。
+    if opt.model == "wav2lip":
+        allow_non50 = os.getenv("ALLOW_NON_50_AUDIO_FPS", "false").lower() in ("1", "true", "yes", "on")
+        if (not allow_non50) and int(getattr(opt, "fps", 50)) != 50:
+            logger.warning(
+                f"[Wav2Lip] Detected --fps={opt.fps}; forcing to 50 for stable audio. "
+                f"Set ALLOW_NON_50_AUDIO_FPS=true to override."
+            )
+            opt.fps = 50
+
     # app.config.from_object(opt)
     # print(app.config)
     opt.customopt = []

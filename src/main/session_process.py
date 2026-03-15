@@ -65,10 +65,12 @@ class SessionProcess:
         try:
             # 创建队列
             self.command_queue = multiprocessing.Queue(maxsize=500)
-            # 严格口型同步：音频/视频队列必须保持同一时间尺度，避免“音频积压/视频丢帧”导致 A/V 漂移
-            # video: 25fps -> 60帧≈2.4s；audio: 50fps -> 120帧≈2.4s
-            self.video_queue = multiprocessing.Queue(maxsize=60)
-            self.audio_queue = multiprocessing.Queue(maxsize=120)
+            # 媒体队列容量（默认提高，降低高峰时抖动和丢帧概率）
+            # video: 25fps, 120≈4.8s；audio: 50fps, 400≈8.0s
+            video_q_max = int(os.getenv("VIDEO_MP_QUEUE_MAX_FRAMES", "120"))
+            audio_q_max = int(os.getenv("AUDIO_MP_QUEUE_MAX_FRAMES", "400"))
+            self.video_queue = multiprocessing.Queue(maxsize=video_q_max)
+            self.audio_queue = multiprocessing.Queue(maxsize=audio_q_max)
             self.status_queue = multiprocessing.Queue(maxsize=10)
             self.speaking_value = multiprocessing.Value('b', False)
 
@@ -263,12 +265,56 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                 self.paired_video_queue = paired_video_queue
                 self.count = 0
                 self.drop_count = 0
-                # Audio overflow dropping must keep A/V aligned (2 audio chunks per 1 video frame @ 25fps).
-                self._audio_overflow_drops = 0
+                self._queue_full_count = 0
                 try:
                     self.audio_put_timeout_s = float(os.getenv("AUDIO_QUEUE_PUT_TIMEOUT_MS", "1500")) / 1000.0
                 except Exception:
                     self.audio_put_timeout_s = 1.5
+                try:
+                    self.audio_local_backlog_max = int(os.getenv("AUDIO_LOCAL_BACKLOG_FRAMES", "2000"))
+                except Exception:
+                    self.audio_local_backlog_max = 2000
+                self._preserve_audio_frames = os.getenv("AUDIO_PRESERVE_FRAMES", "true").lower() in ("1", "true", "yes", "on")
+                self._audio_local_queue = None
+                self._audio_writer_thread = None
+                self._audio_local_drop = 0
+
+                # 核心策略：音频走“本地缓冲 + 单独阻塞写线程”，避免每帧 to_thread 抖动导致周期性卡顿
+                # 并尽量不丢音频帧（宁可视频轻微掉帧，也不让音频爆音/断裂）。
+                if self.frame_type == "audio":
+                    self._audio_local_queue = queue.Queue(maxsize=max(100, self.audio_local_backlog_max))
+                    self._audio_writer_thread = Thread(
+                        target=self._audio_writer_loop,
+                        daemon=True,
+                        name=f"audio-writer-{session_id}",
+                    )
+                    self._audio_writer_thread.start()
+
+            def _audio_writer_loop(self):
+                while not quit_event.is_set() or (self._audio_local_queue is not None and not self._audio_local_queue.empty()):
+                    if self._audio_local_queue is None:
+                        break
+                    try:
+                        serialized = self._audio_local_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+
+                    while True:
+                        try:
+                            self.mp_queue.put(serialized, block=True, timeout=self.audio_put_timeout_s)
+                            break
+                        except queue.Full:
+                            self._queue_full_count += 1
+                            # 音频优先：队列满时等待消费者追平，不直接丢音频
+                            if quit_event.is_set():
+                                # 退出阶段不再强求送完
+                                self.drop_count += 1
+                                break
+                            time.sleep(0.002)
+                        except Exception as e:
+                            logger.error(f"[Session-{session_id}] audio writer loop error: {e}")
+                            self.drop_count += 1
+                            break
 
             async def put(self, frame_data):
                 """异步写入方法 - basereal.py 通过 run_coroutine_threadsafe 调用"""
@@ -293,31 +339,31 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
 
                     # 写入 multiprocessing.Queue
                     # 严格口型同步策略：
-                    # - audio/video 都不允许无界积压（会造成 A/V 漂移）
-                    # - 队列满时丢“最旧”数据，让系统快速追上实时（保持低延迟 + 同步）
+                    # - 音频优先稳定，避免听感卡顿/爆音
+                    # - 视频在高压下可丢旧帧追实时
                     if self.frame_type == "audio":
-                        # Audio is perceptually sensitive: prefer backpressure over dropping.
-                        # We still keep a bounded queue to prevent unbounded latency.
+                        # 先入本地缓冲，再由单独线程阻塞写入 mp.Queue（无 to_thread 抖动）。
+                        if self._audio_local_queue is None:
+                            self.drop_count += 1
+                            return
                         try:
-                            await asyncio.to_thread(self.mp_queue.put, serialized, True, self.audio_put_timeout_s)
+                            self._audio_local_queue.put_nowait(serialized)
                         except queue.Full:
-                            # As a last resort, drop the oldest audio (and paired video every 2 audio drops)
-                            # to keep the system live and maintain A/V alignment.
-                            try:
-                                _old = self.mp_queue.get_nowait()
-                                del _old
-                            except Exception:
-                                pass
-                            self._audio_overflow_drops += 1
-                            if self.paired_video_queue is not None and self._audio_overflow_drops % 2 == 0:
+                            # 极端情况下本地缓冲满：优先丢最旧“本地缓冲”而不是 mp.Queue 已在播的音频。
+                            # 这样不会打断当前播放连续性，听感更平滑。
+                            if self._preserve_audio_frames:
                                 try:
-                                    _oldv = self.paired_video_queue.get_nowait()
-                                    del _oldv
+                                    _old_local = self._audio_local_queue.get_nowait()
+                                    del _old_local
                                 except Exception:
                                     pass
-                            try:
-                                self.mp_queue.put(serialized, block=False)
-                            except Exception:
+                                try:
+                                    self._audio_local_queue.put_nowait(serialized)
+                                except Exception:
+                                    self._audio_local_drop += 1
+                                    self.drop_count += 1
+                            else:
+                                self._audio_local_drop += 1
                                 self.drop_count += 1
                     else:  # video
                         try:
@@ -329,23 +375,18 @@ def _session_main(session_id: str, avatar_id: str, opt: Any,
                                 del _oldv
                             except Exception:
                                 pass
-                            # …and drop corresponding oldest audio frames (2x20ms) to keep lip-sync aligned.
-                            if self.paired_audio_queue is not None:
-                                for _ in range(2):
-                                    try:
-                                        _olda = self.paired_audio_queue.get_nowait()
-                                        del _olda
-                                    except Exception:
-                                        break
                             try:
                                 self.mp_queue.put(serialized, block=False)
                             except Exception:
                                 self.drop_count += 1
+                            self._queue_full_count += 1
 
                     self.count += 1
-                    if self.count % 50 == 0:
+                    if self.count % 200 == 0:
                         logger.info(
-                            f"[Session-{session_id}] {self.frame_type}: Put {self.count} frames (drop={self.drop_count})")
+                            f"[Session-{session_id}] {self.frame_type}: Put={self.count} drop={self.drop_count} "
+                            f"qfull={self._queue_full_count} audio_local_drop={self._audio_local_drop}"
+                        )
 
                 except Exception as e:
                     logger.error(f"[Session-{session_id}] {self.frame_type}.put() error: {e}")

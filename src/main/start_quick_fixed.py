@@ -50,7 +50,7 @@ def setup_config():
 
             # 模型配置
             self.model = 'wav2lip'  # 使用wav2lip模型
-            self.avatar_id = 'wav2lip256_avatar1'
+            self.avatar_id = 'wav2lip384_avatar1'
             self.batch_size = 16
 
             # TTS配置 - 从环境变量读取，如果没有则默认使用Edge TTS（免费）
@@ -101,6 +101,9 @@ def setup_config():
             self.fps = int(os.getenv('FPS', 30))
             self.max_session = int(os.getenv('MAX_SESSION', 1))
             self.listenport = int(os.getenv('LISTEN_PORT', 8010))
+            if self.model == 'wav2lip' and self.fps != 50:
+                logger.warning(f"[Wav2Lip] FPS={self.fps} is unsafe for audio; forcing to 50")
+                self.fps = 50
 
     config = Config()
     return config
@@ -134,9 +137,9 @@ def load_models(opt):
         warm_up(opt.batch_size, model)
     elif opt.model == 'wav2lip':
         from lipreal import LipReal, load_avatar, load_model, warm_up
-        model = load_model("./models/wav2lip256.pth")
+        model = load_model("./models/wav2lip384.pth")
         avatar = load_avatar(opt.avatar_id)
-        warm_up(opt.batch_size, model, 256)
+        warm_up(opt.batch_size, model, 384)
     elif opt.model == 'ultralight':
         from lightreal import LightReal, load_avatar, load_model, warm_up
         model = load_model(opt)

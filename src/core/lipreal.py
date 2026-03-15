@@ -121,6 +121,37 @@ def load_avatar(avatar_id):
         os.path.splitext(os.path.basename(x))[0]))
     face_list_cycle = read_imgs(input_face_list)
 
+    # 输出关键质量指标，帮助判断“384模型为何看不出提升”
+    try:
+        if face_list_cycle:
+            face_h, face_w = face_list_cycle[0].shape[:2]
+        else:
+            face_h, face_w = 0, 0
+
+        bbox_w = [int(x2 - x1) for (y1, y2, x1, x2) in coord_list_cycle] if coord_list_cycle else []
+        bbox_h = [int(y2 - y1) for (y1, y2, x1, x2) in coord_list_cycle] if coord_list_cycle else []
+        avg_bbox_w = float(np.mean(bbox_w)) if bbox_w else 0.0
+        avg_bbox_h = float(np.mean(bbox_h)) if bbox_h else 0.0
+
+        logger.info(
+            f"[Wav2Lip] avatar={avatar_id} face_imgs={face_w}x{face_h} "
+            f"bbox_avg={avg_bbox_w:.1f}x{avg_bbox_h:.1f} frames={len(face_list_cycle)}"
+        )
+
+        if face_w < 384 or face_h < 384:
+            logger.warning(
+                f"[Wav2Lip] avatar={avatar_id} 使用了低于384的face_imgs({face_w}x{face_h})，"
+                "即使加载384模型，清晰度提升也会受限。请重建384头像。"
+            )
+
+        if avg_bbox_w > 0 and avg_bbox_w < 230:
+            logger.warning(
+                f"[Wav2Lip] avatar={avatar_id} 平均人脸框宽度仅 {avg_bbox_w:.1f}px，"
+                "回贴阶段会把384口型结果缩小后再贴回，视觉提升会明显打折。"
+            )
+    except Exception as e:
+        logger.debug(f"[Wav2Lip] Failed to log avatar quality metrics for {avatar_id}: {e}")
+
     return frame_list_cycle, face_list_cycle, coord_list_cycle, avatar_name
 
 

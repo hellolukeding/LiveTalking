@@ -91,7 +91,7 @@ start() {
     DOUBAO_VOICE_ID=${DOUBAO_VOICE_ID:-zh_female_tianxinxiaomei_emo_v2_mars_bigtts}
 
     print_message "$BLUE" "📝 配置参数:"
-    print_message "$BLUE" "   - FPS: 25"
+    print_message "$BLUE" "   - FPS: 50 (audio frame rate)"
     print_message "$BLUE" "   - 分辨率: 384x384"
     print_message "$BLUE" "   - Batch Size: 16 (优化: 最大吞吐量)"
     print_message "$BLUE" "   - TTS: $TTS_TYPE"
@@ -106,12 +106,12 @@ start() {
         --transport rtcpush \
         --push_url "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream" \
         --model wav2lip \
-        --fps 25 \
+        --fps 50 \
         -l 8 -m 6 -r 8 \
         --W 384 --H 384 \
         --batch_size 16 \
         --listenport 8010 \
-        --avatar_id wav2lip256_avatar1 \
+        --avatar_id wav2lip384_avatar1 \
         --tts $TTS_TYPE \
         --REF_FILE $DOUBAO_VOICE_ID \
         --asr tencent \

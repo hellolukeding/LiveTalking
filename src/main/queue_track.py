@@ -31,6 +31,7 @@ DEFAULT_AUDIO_JITTER_MAX_S = float(os.getenv("AUDIO_JITTER_MAX_MS", "180")) / 10
 DEFAULT_AUDIO_JITTER_MULT = float(os.getenv("AUDIO_JITTER_MULT", "4.0"))
 DEFAULT_AUDIO_LOCAL_BUF_TARGET = int(os.getenv("AUDIO_LOCAL_BUF_TARGET", "8"))
 DEFAULT_AUDIO_START_PREROLL_S = float(os.getenv("AUDIO_START_PREROLL_MS", "120")) / 1000.0
+DEFAULT_AUDIO_UNDERFLOW_HOLD_LAST = os.getenv("AUDIO_UNDERFLOW_HOLD_LAST", "false").lower() in ("1", "true", "yes", "on")
 DEFAULT_VIDEO_JITTER_WAIT_S = float(os.getenv("VIDEO_JITTER_WAIT_MS", "20")) / 1000.0
 
 
@@ -102,6 +103,7 @@ class QueueAudioTrack(MediaStreamTrack):
         self._local_buf: deque = deque()
         self._last_good_frame_data = None
         self._preroll_done = False
+        self._hold_last_on_underflow = DEFAULT_AUDIO_UNDERFLOW_HOLD_LAST
 
         logger.info(f"[QueueAudioTrack] Created for session {session_id}")
 
@@ -250,9 +252,11 @@ class QueueAudioTrack(MediaStreamTrack):
                     f"[QueueAudioTrack] Session {self.session_id} underflow x{self._underflow_count} "
                     f"(sr={self._sample_rate}, samples={self._frame_samples})"
                 )
-            # Try repeating the last good frame once before falling back to silence.
+            # Underflow strategy:
+            # - default: output silence (avoid repeated-phoneme "卡顿感")
+            # - optional: hold last frame if AUDIO_UNDERFLOW_HOLD_LAST=true
             audio_frame = None
-            if self._last_good_frame_data is not None:
+            if self._hold_last_on_underflow and self._last_good_frame_data is not None:
                 try:
                     audio_frame = deserialize_audio_frame(self._last_good_frame_data)
                 except Exception:

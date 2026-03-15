@@ -64,6 +64,7 @@ export default function VideoChat() {
     const videoRef = useRef<HTMLVideoElement>(null);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
+    const remoteAudioStreamRef = useRef<MediaStream | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const durationRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -965,13 +966,38 @@ export default function VideoChat() {
         };
 
         pc.addEventListener('track', (evt) => {
+            console.log('[WEBRTC] Remote track:', evt.track.kind, 'streams=', evt.streams?.length ?? 0);
             if (evt.track.kind === 'video') {
                 if (videoRef.current) {
-                    videoRef.current.srcObject = evt.streams[0];
+                    const incoming = evt.streams && evt.streams[0]
+                        ? evt.streams[0]
+                        : new MediaStream([evt.track]);
+                    videoRef.current.srcObject = incoming;
                 }
             } else {
                 if (audioRef.current) {
-                    audioRef.current.srcObject = evt.streams[0];
+                    if (!remoteAudioStreamRef.current) {
+                        remoteAudioStreamRef.current = new MediaStream();
+                    }
+                    const stream = remoteAudioStreamRef.current;
+                    const exists = stream.getTracks().some(track => track.id === evt.track.id);
+                    if (!exists) {
+                        stream.addTrack(evt.track);
+                    }
+                    audioRef.current.srcObject = stream;
+                    audioRef.current.autoplay = true;
+                    audioRef.current.muted = !isSpeakerOn;
+                    audioRef.current.volume = 1.0;
+                    const sinkSetter = (audioRef.current as any).setSinkId;
+                    if (typeof sinkSetter === 'function') {
+                        sinkSetter.call(audioRef.current, 'default').catch((err: unknown) => {
+                            console.warn('[AUDIO] setSinkId default failed:', err);
+                        });
+                    }
+                    audioRef.current.play().catch((err) => {
+                        console.warn('[AUDIO] autoplay blocked:', err);
+                    });
+                    console.log('[AUDIO] Attached remote audio track:', evt.track.id);
                 }
             }
         });
@@ -1045,6 +1071,13 @@ export default function VideoChat() {
         upstreamReadyRef.current = false;
         upstreamAudioSenderRef.current = null;
         upstreamMicTrackRef.current = null;
+        if (remoteAudioStreamRef.current) {
+            remoteAudioStreamRef.current.getTracks().forEach(track => track.stop());
+            remoteAudioStreamRef.current = null;
+        }
+        if (audioRef.current) {
+            audioRef.current.srcObject = null;
+        }
 
         // 关闭本地摄像头
         if (localStreamRef.current) {
@@ -1081,11 +1114,15 @@ export default function VideoChat() {
     };
 
     const toggleSpeaker = () => {
-        setIsSpeakerOn(!isSpeakerOn);
-        if (audioRef.current) {
-            audioRef.current.muted = isSpeakerOn;
-        }
+        setIsSpeakerOn(prev => !prev);
     };
+
+    useEffect(() => {
+        if (audioRef.current) {
+            audioRef.current.muted = !isSpeakerOn;
+            audioRef.current.volume = 1.0;
+        }
+    }, [isSpeakerOn]);
 
     // 开启/关闭本地摄像头
     const toggleCamera = async () => {

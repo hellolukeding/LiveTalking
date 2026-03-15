@@ -8,6 +8,13 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
+  resolve: {
+    // Prevent duplicate React runtimes that can trigger "Invalid hook call".
+    dedupe: ["react", "react-dom"],
+  },
+  optimizeDeps: {
+    include: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -25,7 +32,12 @@ export default defineConfig(async () => ({
         host,
         port: 1421,
       }
-      : undefined,
+      : {
+        protocol: "ws",
+        host: "localhost",
+        port: 1420,
+        clientPort: 1420,
+      },
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],

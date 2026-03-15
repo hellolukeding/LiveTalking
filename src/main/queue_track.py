@@ -167,7 +167,8 @@ class QueueAudioTrack(MediaStreamTrack):
         else:
             # If producer is slightly late, wait up to ~one frame period before declaring underflow.
             frame_period_s = float(self._frame_samples) / float(self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
-            jitter_wait_s = max(DEFAULT_AUDIO_JITTER_WAIT_S, min(frame_period_s, 0.05))
+            # Use up to ~2 frame periods to absorb bursty producer writes and reduce periodic stutter.
+            jitter_wait_s = max(DEFAULT_AUDIO_JITTER_WAIT_S, min(frame_period_s * 2.0, 0.08))
             got_item, frame_data = await self._try_get_frame_data(timeout_s=jitter_wait_s)
 
         if got_item and frame_data is None:

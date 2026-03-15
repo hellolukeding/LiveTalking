@@ -141,6 +141,15 @@ class EdgeTTS(BaseTTS):
             self.parent.put_audio_frame(stream[idx:idx+self.chunk], eventpoint)
             idx += self.chunk
 
+        # 尾帧补齐：避免最后不足一个chunk的尾音被截断
+        remain = stream[idx:]
+        if remain.size > 0 and self.state == State.RUNNING:
+            padded = np.zeros(self.chunk, dtype=np.float32)
+            padded[:remain.size] = remain
+            eventpoint = {'status': 'end', 'text': text}
+            eventpoint.update(**textevent)
+            self.parent.put_audio_frame(padded, eventpoint)
+
         self.input_stream.seek(0)
         self.input_stream.truncate()
 
@@ -241,12 +250,14 @@ class FishTTS(BaseTTS):
     def stream_tts(self, audio_stream, msg: tuple[str, dict]):
         text, textevent = msg
         first = True
+        last_stream = np.array([], dtype=np.float32)
         for chunk in audio_stream:
             if chunk is not None and len(chunk) > 0:
                 stream = np.frombuffer(
                     chunk, dtype=np.int16).astype(np.float32) / 32767
                 stream = resampy.resample(
                     x=stream, sr_orig=44100, sr_new=self.sample_rate)
+                stream = np.concatenate((last_stream, stream))
                 # byte_stream=BytesIO(buffer)
                 # stream = self.__create_bytes_stream(byte_stream)
                 streamlen = stream.shape[0]
@@ -262,6 +273,16 @@ class FishTTS(BaseTTS):
                         stream[idx:idx+self.chunk], eventpoint)
                     streamlen -= self.chunk
                     idx += self.chunk
+                last_stream = stream[idx:]  # 保留不足一个chunk的尾巴
+        if last_stream.size > 0 and self.state == State.RUNNING:
+            padded = np.zeros(self.chunk, dtype=np.float32)
+            padded[:last_stream.size] = last_stream
+            eventpoint = {}
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+            self.parent.put_audio_frame(padded, eventpoint)
         eventpoint = {'status': 'end', 'text': text}
         # eventpoint={'status':'end','text':text,'msgevent':textevent}
         eventpoint.update(**textevent)
@@ -353,12 +374,14 @@ class SovitsTTS(BaseTTS):
     def stream_tts(self, audio_stream, msg: tuple[str, dict]):
         text, textevent = msg
         first = True
+        last_stream = np.array([], dtype=np.float32)
         for chunk in audio_stream:
             if chunk is not None and len(chunk) > 0:
                 # stream = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32767
                 # stream = resampy.resample(x=stream, sr_orig=32000, sr_new=self.sample_rate)
                 byte_stream = BytesIO(chunk)
                 stream = self.__create_bytes_stream(byte_stream)
+                stream = np.concatenate((last_stream, stream))
                 streamlen = stream.shape[0]
                 idx = 0
                 while streamlen >= self.chunk:
@@ -371,6 +394,16 @@ class SovitsTTS(BaseTTS):
                         stream[idx:idx+self.chunk], eventpoint)
                     streamlen -= self.chunk
                     idx += self.chunk
+                last_stream = stream[idx:]  # 保留不足一个chunk的尾巴
+        if last_stream.size > 0 and self.state == State.RUNNING:
+            padded = np.zeros(self.chunk, dtype=np.float32)
+            padded[:last_stream.size] = last_stream
+            eventpoint = {}
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+            self.parent.put_audio_frame(padded, eventpoint)
         eventpoint = {'status': 'end', 'text': text}
         eventpoint.update(**textevent)
         self.parent.put_audio_frame(
@@ -428,12 +461,14 @@ class CosyVoiceTTS(BaseTTS):
     def stream_tts(self, audio_stream, msg: tuple[str, dict]):
         text, textevent = msg
         first = True
+        last_stream = np.array([], dtype=np.float32)
         for chunk in audio_stream:
             if chunk is not None and len(chunk) > 0:
                 stream = np.frombuffer(
                     chunk, dtype=np.int16).astype(np.float32) / 32767
                 stream = resampy.resample(
                     x=stream, sr_orig=24000, sr_new=self.sample_rate)
+                stream = np.concatenate((last_stream, stream))
                 # byte_stream=BytesIO(buffer)
                 # stream = self.__create_bytes_stream(byte_stream)
                 streamlen = stream.shape[0]
@@ -448,6 +483,16 @@ class CosyVoiceTTS(BaseTTS):
                         stream[idx:idx+self.chunk], eventpoint)
                     streamlen -= self.chunk
                     idx += self.chunk
+                last_stream = stream[idx:]  # 保留不足一个chunk的尾巴
+        if last_stream.size > 0 and self.state == State.RUNNING:
+            padded = np.zeros(self.chunk, dtype=np.float32)
+            padded[:last_stream.size] = last_stream
+            eventpoint = {}
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+            self.parent.put_audio_frame(padded, eventpoint)
         eventpoint = {'status': 'end', 'text': text}
         eventpoint.update(**textevent)
         self.parent.put_audio_frame(
@@ -581,6 +626,15 @@ class TencentTTS(BaseTTS):
                     streamlen -= self.chunk
                     idx += self.chunk
                 last_stream = stream[idx:]  # get the remain stream
+        if last_stream.size > 0 and self.state == State.RUNNING:
+            padded = np.zeros(self.chunk, dtype=np.float32)
+            padded[:last_stream.size] = last_stream
+            eventpoint = {}
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+            self.parent.put_audio_frame(padded, eventpoint)
         eventpoint = {'status': 'end', 'text': text}
         eventpoint.update(**textevent)
         self.parent.put_audio_frame(
@@ -715,11 +769,11 @@ class DoubaoTTS(BaseTTS):
                 # For resampling, process in blocks to reduce overhead.
                 api_sr = int(getattr(self, "api_sample_rate", 24000) or 24000)
                 out_sr = int(self.sample_rate or 16000)
-                # ~100ms blocks by default; configurable for tuning.
+                # 默认更小分块，降低“突发入队”带来的周期性卡顿风险。
                 try:
-                    resample_block_ms = int(os.getenv("DOUBAO_RESAMPLE_BLOCK_MS", "100"))
+                    resample_block_ms = int(os.getenv("DOUBAO_RESAMPLE_BLOCK_MS", "40"))
                 except Exception:
-                    resample_block_ms = 100
+                    resample_block_ms = 40
                 resample_block_ms = max(20, min(500, resample_block_ms))
                 resample_block_n = int(api_sr * (resample_block_ms / 1000.0))
                 if resample_block_n <= 0:
@@ -785,22 +839,28 @@ class DoubaoTTS(BaseTTS):
                     if remaining is not None and remaining.size > 0:
                         audio_buffer.push(resampy.resample(remaining, sr_orig=api_sr, sr_new=out_sr))
 
-                if len(audio_buffer) > 0 and self.state == State.RUNNING:
-                    chunk = audio_buffer.pop(min(chunk_size, len(audio_buffer)))
+                # Flush 所有剩余采样，避免句尾丢失（之前只发送一个chunk会截断尾音）
+                while len(audio_buffer) > 0 and self.state == State.RUNNING:
+                    take_n = min(chunk_size, len(audio_buffer))
+                    chunk = audio_buffer.pop(take_n)
                     if chunk is None:
-                        chunk = np.zeros(chunk_size, dtype=np.float32)
+                        break
                     if chunk.size < chunk_size:
                         padded = np.zeros(chunk_size, dtype=np.float32)
                         padded[:chunk.size] = chunk
                         chunk = padded
 
-                    eventpoint = {'status': 'end', 'text': text}
+                    eventpoint = {}
                     if first_chunk:
-                        eventpoint['status'] = 'start'
+                        eventpoint = {'status': 'start', 'text': text}
+                        eventpoint.update(textevent)
+                        first_chunk = False
                     self.parent.put_audio_frame(chunk, eventpoint)
                     total_sent += 1
-                elif total_sent > 0:
+
+                if total_sent > 0:
                     eventpoint = {'status': 'end', 'text': text}
+                    eventpoint.update(textevent)
                     self.parent.put_audio_frame(
                         np.zeros(chunk_size, dtype=np.float32), eventpoint)
 
@@ -1499,6 +1559,18 @@ class IndexTTS2(BaseTTS):
                 idx += self.chunk
                 streamlen -= self.chunk
 
+            # 补发最后不足一个chunk的尾音，避免片段末尾被截断
+            remain = stream[idx:]
+            if remain.size > 0 and self.state == State.RUNNING:
+                padded = np.zeros(self.chunk, dtype=np.float32)
+                padded[:remain.size] = remain
+                eventpoint = None
+                if is_first and first_chunk:
+                    eventpoint = {'status': 'start',
+                                  'text': text, 'msgevent': textevent}
+                    first_chunk = False
+                self.parent.put_audio_frame(padded, eventpoint)
+
             # 只在最后一个片段发送end事件
             if is_last:
                 eventpoint = {'status': 'end',
@@ -1577,12 +1649,14 @@ class XTTS(BaseTTS):
     def stream_tts(self, audio_stream, msg: tuple[str, dict]):
         text, textevent = msg
         first = True
+        last_stream = np.array([], dtype=np.float32)
         for chunk in audio_stream:
             if chunk is not None and len(chunk) > 0:
                 stream = np.frombuffer(
                     chunk, dtype=np.int16).astype(np.float32) / 32767
                 stream = resampy.resample(
                     x=stream, sr_orig=24000, sr_new=self.sample_rate)
+                stream = np.concatenate((last_stream, stream))
                 # byte_stream=BytesIO(buffer)
                 # stream = self.__create_bytes_stream(byte_stream)
                 streamlen = stream.shape[0]
@@ -1597,6 +1671,16 @@ class XTTS(BaseTTS):
                         stream[idx:idx+self.chunk], eventpoint)
                     streamlen -= self.chunk
                     idx += self.chunk
+                last_stream = stream[idx:]  # 保留不足一个chunk的尾巴
+        if last_stream.size > 0 and self.state == State.RUNNING:
+            padded = np.zeros(self.chunk, dtype=np.float32)
+            padded[:last_stream.size] = last_stream
+            eventpoint = {}
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+            self.parent.put_audio_frame(padded, eventpoint)
         eventpoint = {'status': 'end', 'text': text}
         eventpoint.update(**textevent)
         self.parent.put_audio_frame(

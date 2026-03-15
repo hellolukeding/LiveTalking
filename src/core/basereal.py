@@ -136,7 +136,7 @@ class BaseReal:
         # - True: send TTS PCM directly to WebRTC audio queue in put_audio_frame()
         #         to avoid coupling audio continuity to video inference latency.
         # - False: keep legacy path (audio emitted from process_frames()).
-        self._direct_tts_audio_out = os.getenv("DIRECT_TTS_AUDIO_OUT", "true").lower() in ("1", "true", "yes", "on")
+        self._direct_tts_audio_out = os.getenv("DIRECT_TTS_AUDIO_OUT", "false").lower() in ("1", "true", "yes", "on")
 
     @property
     def _render_quit_event(self):

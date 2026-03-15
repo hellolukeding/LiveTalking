@@ -732,6 +732,12 @@ async def offer(request):
                 logger.debug(
                     f"[WEBRTC] Audio track received for session {sessionid}")
                 # 将接收到的音频交给编排器（VAD->ASR->LLM->TTS）
+                try:
+                    nerfreal = nerfreals.get(sessionid)
+                    if nerfreal:
+                        nerfreal.send_custom_msg("ASR_UPSTREAM_READY")
+                except Exception as e:
+                    logger.debug(f"[WEBRTC] Failed to send ASR_UPSTREAM_READY(on_track) for session {sessionid}: {e}")
 
                 @track.on("ended")
                 def on_ended():

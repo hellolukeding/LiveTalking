@@ -212,7 +212,8 @@ export default function AvatarListPage() {
       <div style={{ padding: '32px 40px' }}>
         {loading ? (
           <div style={{ textAlign: 'center', paddingTop: 100 }}>
-            <Spin size="large" tip="加载中..." />
+            <Spin size="large" />
+            <div style={{ marginTop: 12, color: '#888' }}>加载中...</div>
           </div>
         ) : avatars.length === 0 ? (
           <Empty

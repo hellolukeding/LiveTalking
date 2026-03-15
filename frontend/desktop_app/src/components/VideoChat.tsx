@@ -127,10 +127,9 @@ export default function VideoChat() {
         if (!USE_WEBRTC_UPSTREAM_ASR && asrBufferRef.current.length > 0) {
             const buffers = [...asrBufferRef.current];
             asrBufferRef.current = [];
-            const picked = buffers.slice(-6);
-            const merged = new Blob(picked.map(item => item.audioBlob), { type: asrMimeTypeRef.current || 'audio/webm' });
-            console.log('[State] Processing buffered audio:', picked.length, 'chunks, merged size:', merged.size);
-            sendAudioToBackend(merged);
+            const latest = buffers[buffers.length - 1];
+            console.log('[State] Processing buffered audio:', buffers.length, 'chunks, latest size:', latest.audioBlob.size);
+            sendAudioToBackend(latest.audioBlob);
         }
     };
     const setStateLLMProcessing = () => {
@@ -223,9 +222,9 @@ export default function VideoChat() {
 
         const buffers = [...asrBufferRef.current];
         asrBufferRef.current = [];
-        const merged = new Blob(buffers.map(item => item.audioBlob), { type: asrMimeTypeRef.current || 'audio/webm' });
-        console.log('[ASR] Flushing buffered audio:', buffers.length, 'chunks, merged:', merged.size, 'bytes');
-        sendAudioToBackend(merged);
+        const latest = buffers[buffers.length - 1];
+        console.log('[ASR] Flushing buffered audio:', buffers.length, 'chunks, latest:', latest.audioBlob.size, 'bytes');
+        sendAudioToBackend(latest.audioBlob);
     };
 
     const isLikelyEchoFromAssistant = (text: string): boolean => {
@@ -526,7 +525,6 @@ export default function VideoChat() {
         startASR();
         return () => {
             cancelled = true;
-            stopBackendASR();
         };
     }, [isVoiceChatOn, isStarted]);
 
@@ -577,55 +575,41 @@ export default function VideoChat() {
             // 记录实际使用的 mimeType
             console.log('[ASR] MediaRecorder actual mimeType:', mediaRecorder.mimeType);
 
+            let recordingChunks: BlobPart[] = [];
+
             mediaRecorder.ondataavailable = (event) => {
-                if (!event.data || event.data.size <= 0) {
+                if (event.data && event.data.size > 0) {
+                    recordingChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                if (recordingChunks.length === 0) {
+                    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && isVoiceChatOn) {
+                        mediaRecorderRef.current.start();
+                    }
                     return;
                 }
 
-                const audioBlob = new Blob([event.data], { type: selectedMimeType });
+                const audioBlob = new Blob(recordingChunks, { type: selectedMimeType });
+                recordingChunks = [];
                 console.log('[ASR] Blob size:', audioBlob.size, 'type:', audioBlob.type, 'state:', conversationStateRef.current);
 
                 if (conversationStateRef.current === ConversationState.LISTENING) {
-                    asrBufferRef.current.push({
-                        audioBlob: audioBlob,
-                        timestamp: Date.now()
-                    });
-
-                    const flushLocalASR = () => {
-                        if (asrBufferRef.current.length === 0) {
-                            return;
-                        }
-                        const buffers = [...asrBufferRef.current];
-                        asrBufferRef.current = [];
-                        const merged = new Blob(buffers.map(item => item.audioBlob), { type: selectedMimeType });
-                        console.log('[ASR] Local ASR flush:', buffers.length, 'chunks, merged bytes:', merged.size);
-                        sendAudioToBackend(merged);
-                    };
-
-                    if (!asrFlushTimerRef.current) {
-                        asrFlushTimerRef.current = setTimeout(() => {
-                            asrFlushTimerRef.current = null;
-                            flushLocalASR();
-                        }, 420);
-                    }
-
-                    if (asrBufferRef.current.length >= 5) {
-                        if (asrFlushTimerRef.current) {
-                            clearTimeout(asrFlushTimerRef.current);
-                            asrFlushTimerRef.current = null;
-                        }
-                        flushLocalASR();
-                    }
+                    sendAudioToBackend(audioBlob);
                 } else if (conversationStateRef.current === ConversationState.LLM_PROCESSING ||
                     conversationStateRef.current === ConversationState.TTS_PLAYING) {
-                    console.log('[ASR] State=' + conversationStateRef.current + ', buffering audio');
                     asrBufferRef.current.push({
                         audioBlob: audioBlob,
                         timestamp: Date.now()
                     });
-                    if (asrBufferRef.current.length > 25) {
+                    if (asrBufferRef.current.length > 8) {
                         asrBufferRef.current.shift();
                     }
+                }
+
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && isVoiceChatOn) {
+                    mediaRecorderRef.current.start();
                 }
             };
 
@@ -633,17 +617,22 @@ export default function VideoChat() {
             mediaRecorderRef.current = mediaRecorder;
             asrMimeTypeRef.current = selectedMimeType;
 
-            // 开始录音（使用 timeslice 连续切片，避免 stop/start 造成漏词）
+            // 开始录音（stop/start 分段，确保每段都是可解码容器）
             const startRecording = () => {
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-                    mediaRecorderRef.current.start(280);
+                    recordingChunks = [];
+                    mediaRecorderRef.current.start();
                 }
             };
 
             // 第一次开始录音
             startRecording();
 
-            asrIntervalRef.current = null;
+            asrIntervalRef.current = setInterval(() => {
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+                    mediaRecorderRef.current.stop();
+                }
+            }, 850);
 
             // 设置初始状态为 LISTENING
             setStateListening();
@@ -721,7 +710,7 @@ export default function VideoChat() {
                 const queuedBlob = asrQueuedBlobRef.current;
                 asrQueuedBlobRef.current = null;
                 if (queuedBlob) {
-                    setTimeout(() => sendAudioToBackend(queuedBlob), 0);
+                    setTimeout(() => sendAudioToBackend(queuedBlob), 80);
                 }
             }
         })();
@@ -730,6 +719,15 @@ export default function VideoChat() {
     // 发送音频到后端进行识别（保留这个函数以防被其他地方调用）
     // 停止后端 ASR
     const stopBackendASR = () => {
+        const hadActiveASR = Boolean(
+            mediaRecorderRef.current ||
+            micPermissionStreamRef.current ||
+            upstreamMicTrackRef.current ||
+            asrIntervalRef.current ||
+            asrFlushTimerRef.current ||
+            upstreamReadyTimerRef.current
+        );
+
         // 仅本地分片 ASR 模式需要 flush。WebRTC 上行模式直接丢弃本地缓存。
         if (!USE_WEBRTC_UPSTREAM_ASR && asrBufferRef.current.length > 0) {
             flushASRBuffer();
@@ -797,7 +795,9 @@ export default function VideoChat() {
             recognitionRef.current = null;
         }
 
-        console.log('[ASR] Backend ASR stopped');
+        if (hadActiveASR) {
+            console.log('[ASR] Backend ASR stopped');
+        }
     };
 
     const resetTimer = () => {
@@ -972,7 +972,6 @@ export default function VideoChat() {
             }
         });
 
-        pc.addTransceiver('video', { direction: 'recvonly' });
         const initialUpstreamTrack = USE_WEBRTC_UPSTREAM_ASR ? createSilentUpstreamTrack() : null;
         const upstreamAudioTransceiver = initialUpstreamTrack
             ? pc.addTransceiver(initialUpstreamTrack, { direction: 'sendrecv' })
@@ -980,6 +979,7 @@ export default function VideoChat() {
                 direction: USE_WEBRTC_UPSTREAM_ASR ? 'sendrecv' : 'recvonly'
             });
         upstreamAudioSenderRef.current = upstreamAudioTransceiver.sender ?? null;
+        pc.addTransceiver('video', { direction: 'recvonly' });
 
         try {
             const offer = await pc.createOffer();

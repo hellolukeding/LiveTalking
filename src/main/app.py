@@ -696,6 +696,19 @@ async def offer(request):
                                 continue
                             audio_array = frame.to_ndarray()
                             sample_rate = getattr(frame, "sample_rate", None)
+                            if not sample_rate:
+                                # Some incoming AudioFrame instances may omit sample_rate; infer from time_base if possible.
+                                tb = getattr(frame, "time_base", None)
+                                try:
+                                    if tb is not None and getattr(tb, "numerator", 0):
+                                        inferred = int(tb.denominator / tb.numerator)
+                                        if inferred > 0:
+                                            sample_rate = inferred
+                                except Exception:
+                                    pass
+                            if not sample_rate:
+                                # WebRTC audio is typically 48kHz; falling back to 16kHz can break resampling-based ASR.
+                                sample_rate = 48000
                             orch = session_orchestrators.get(sessionid)
                             if orch:
                                 orch.ingest_audio(audio_array, sample_rate)

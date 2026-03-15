@@ -7,6 +7,7 @@ import fractions
 import time
 import os
 import numpy as np
+from collections import deque
 from av import AudioFrame, VideoFrame
 from aiortc import MediaStreamTrack
 from typing import Optional, Set
@@ -79,8 +80,57 @@ class QueueAudioTrack(MediaStreamTrack):
         self._timestamp = 0  # in samples
         self._start_time: Optional[float] = None
         self._stopped = False
+        # Track actual stream parameters (may differ from defaults in some runs).
+        self._sample_rate = DEFAULT_AUDIO_SAMPLE_RATE
+        self._frame_samples = DEFAULT_AUDIO_SAMPLES
+        # Simple underflow metrics (helps diagnose "audio stutter" caused by empty queue).
+        self._underflow_count = 0
+        self._last_underflow_log = 0.0
+        # Small local buffer to absorb mp.Queue scheduling jitter.
+        self._local_buf: deque = deque()
 
         logger.info(f"[QueueAudioTrack] Created for session {session_id}")
+
+    def _make_silence(self) -> AudioFrame:
+        samples = int(self._frame_samples or DEFAULT_AUDIO_SAMPLES)
+        sample_rate = int(self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
+        silence = np.zeros((1, samples), dtype=np.int16)
+        frame = AudioFrame.from_ndarray(silence, layout="mono", format="s16")
+        frame.sample_rate = sample_rate
+        return frame
+
+    def _update_stream_hints(self, audio_frame: AudioFrame):
+        try:
+            sr = int(getattr(audio_frame, "sample_rate", None) or self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
+            self._sample_rate = sr
+        except Exception:
+            pass
+        try:
+            n = int(getattr(audio_frame, "samples", None) or 0)
+            if n > 0:
+                self._frame_samples = n
+        except Exception:
+            pass
+
+    async def _try_get_frame_data(self, timeout_s: float) -> tuple[bool, Optional[object]]:
+        """
+        Attempt to get a frame payload from the multiprocessing queue.
+        Returns (got_item, frame_data); got_item=False indicates queue empty.
+        """
+        try:
+            frame_data = self.queue.get_nowait()
+            return True, frame_data
+        except std_queue.Empty:
+            pass
+
+        if timeout_s <= 0:
+            return False, None
+
+        try:
+            frame_data = await asyncio.to_thread(self.queue.get, True, timeout_s)
+            return True, frame_data
+        except std_queue.Empty:
+            return False, None
 
     async def recv(self):
         """接收下一帧"""
@@ -94,25 +144,31 @@ class QueueAudioTrack(MediaStreamTrack):
 
         # Pace to the wall clock based on the RTP timestamp we are about to emit.
         # NOTE: aiortc sends as fast as recv() returns; pacing here prevents burst-send then starvation.
-        sample_rate_hint = DEFAULT_AUDIO_SAMPLE_RATE
+        sample_rate_hint = int(self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
         target_time = self._start_time + (self._timestamp / sample_rate_hint)
         now = time.perf_counter()
         wait = target_time - now
         if wait > 0:
             await asyncio.sleep(wait)
 
-        # Prefer non-blocking dequeue; if producer stalls, synthesize silence to keep the audio clock continuous.
-        try:
-            frame_data = self.queue.get_nowait()
+        # Drain a few items quickly to smooth out mp.Queue jitter.
+        # Do NOT drain unboundedly: it can increase latency.
+        while len(self._local_buf) < 3:
+            got, item = await self._try_get_frame_data(timeout_s=0)
+            if not got:
+                break
+            self._local_buf.append(item)
+
+        got_item = False
+        frame_data = None
+        if self._local_buf:
+            frame_data = self._local_buf.popleft()
             got_item = True
-        except std_queue.Empty:
-            # Small jitter wait: if producer is slightly late, wait a bit instead of injecting silence.
-            try:
-                frame_data = await asyncio.to_thread(self.queue.get, True, DEFAULT_AUDIO_JITTER_WAIT_S)
-                got_item = True
-            except std_queue.Empty:
-                frame_data = None
-                got_item = False
+        else:
+            # If producer is slightly late, wait up to ~one frame period before declaring underflow.
+            frame_period_s = float(self._frame_samples) / float(self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
+            jitter_wait_s = max(DEFAULT_AUDIO_JITTER_WAIT_S, min(frame_period_s, 0.05))
+            got_item, frame_data = await self._try_get_frame_data(timeout_s=jitter_wait_s)
 
         if got_item and frame_data is None:
             logger.info(f"[QueueAudioTrack] Session {self.session_id} received end signal")
@@ -120,10 +176,16 @@ class QueueAudioTrack(MediaStreamTrack):
             raise StopIteration
 
         if not got_item:
-            # Fallback: if the producer is stalled, output silence to keep the track alive.
-            silence = np.zeros((1, DEFAULT_AUDIO_SAMPLES), dtype=np.int16)
-            audio_frame = AudioFrame.from_ndarray(silence, layout="mono", format="s16")
-            audio_frame.sample_rate = DEFAULT_AUDIO_SAMPLE_RATE
+            # Fallback: producer stalled. Output silence to keep the track alive, but match stream cadence.
+            self._underflow_count += 1
+            tnow = time.perf_counter()
+            if tnow - self._last_underflow_log >= 5.0:
+                self._last_underflow_log = tnow
+                logger.warning(
+                    f"[QueueAudioTrack] Session {self.session_id} underflow x{self._underflow_count} "
+                    f"(sr={self._sample_rate}, samples={self._frame_samples})"
+                )
+            audio_frame = self._make_silence()
         else:
             try:
                 audio_frame = deserialize_audio_frame(frame_data)
@@ -135,11 +197,11 @@ class QueueAudioTrack(MediaStreamTrack):
                 except Exception:
                     sample_rate = None
                 sample_rate = int(sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
-                silence = np.zeros((1, DEFAULT_AUDIO_SAMPLES), dtype=np.int16)
-                audio_frame = AudioFrame.from_ndarray(silence, layout="mono", format="s16")
-                audio_frame.sample_rate = sample_rate
+                self._sample_rate = sample_rate
+                audio_frame = self._make_silence()
 
-        sample_rate = int(getattr(audio_frame, "sample_rate", None) or DEFAULT_AUDIO_SAMPLE_RATE)
+        self._update_stream_hints(audio_frame)
+        sample_rate = int(getattr(audio_frame, "sample_rate", None) or self._sample_rate or DEFAULT_AUDIO_SAMPLE_RATE)
 
         audio_frame.pts = self._timestamp
         audio_frame.time_base = fractions.Fraction(1, sample_rate)

@@ -6,9 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
-import resampy
-
-from llm import llm_response
 
 logger = logging.getLogger(__name__)
 
@@ -53,29 +50,41 @@ def _to_mono_float32(samples: np.ndarray) -> np.ndarray:
 @dataclass
 class VADConfig:
     sample_rate_out: int = 16000
-    rms_speech: float = 0.010
-    rms_barge_in: float = 0.020
-    end_silence_ms: int = 450
-    min_utterance_ms: int = 600
+    # VAD thresholds are RMS in [0,1]. Defaults bias slightly towards sensitivity;
+    # a noise-adaptive floor (below) helps avoid false triggers in noisy rooms.
+    rms_speech: float = 0.006
+    rms_barge_in: float = 0.012
+    end_silence_ms: int = 400
+    min_utterance_ms: int = 450
     max_utterance_ms: int = 8000
     cooldown_ms: int = 1200
     dedup_window_ms: int = 5000
     barge_in_ms: int = 200
     enable_orchestrator: bool = True
+    noise_adapt: bool = True
+    noise_alpha: float = 0.05
+    noise_multiplier: float = 3.0
+    noise_margin: float = 0.0015
+    debug_rms: bool = False
 
     @classmethod
     def from_env(cls) -> "VADConfig":
         return cls(
             sample_rate_out=_env_int("ORCH_ASR_SR", 16000),
-            rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.010),
-            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.020),
-            end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 450),
-            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 600),
+            rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.006),
+            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.012),
+            end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 400),
+            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 450),
             max_utterance_ms=_env_int("ORCH_VAD_MAX_UTTERANCE_MS", 8000),
             cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 1200),
             dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 5000),
             barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 200),
             enable_orchestrator=_env_bool("ORCH_ENABLED", True),
+            noise_adapt=_env_bool("ORCH_VAD_NOISE_ADAPT", True),
+            noise_alpha=_env_float("ORCH_VAD_NOISE_ALPHA", 0.05),
+            noise_multiplier=_env_float("ORCH_VAD_NOISE_MULT", 3.0),
+            noise_margin=_env_float("ORCH_VAD_NOISE_MARGIN", 0.0015),
+            debug_rms=_env_bool("ORCH_VAD_DEBUG", False),
         )
 
 
@@ -128,6 +137,9 @@ class ConversationOrchestrator:
         self._utterance_sr: Optional[int] = None
 
         self._barge_in_started_time: Optional[float] = None
+
+        self._noise_rms: Optional[float] = None
+        self._last_debug_time = 0.0
 
         self._asr = None
         try:
@@ -198,9 +210,37 @@ class ConversationOrchestrator:
         rms = float(np.sqrt(np.mean(np.square(mono))) + 1e-12)
 
         speaking = self._is_tts_speaking()
+
+        base_thr_speech = float(self.cfg.rms_speech)
+
+        # Update a simple noise-floor estimate only from quiet frames (below base threshold).
+        # If the first audio we ever see is speech, we intentionally keep noise floor unset so VAD remains sensitive.
+        if self.cfg.noise_adapt and (not speaking) and (not self._in_speech) and rms < base_thr_speech:
+            if self._noise_rms is None:
+                self._noise_rms = rms
+            else:
+                alpha = float(self.cfg.noise_alpha)
+                self._noise_rms = (1.0 - alpha) * self._noise_rms + alpha * rms
+
+        # Compute dynamic thresholds (only if we have a learned noise floor).
+        thr_speech = base_thr_speech
+        thr_barge = float(self.cfg.rms_barge_in)
+        if self.cfg.noise_adapt and self._noise_rms is not None:
+            floor = float(self._noise_rms)
+            thr_speech = max(thr_speech, floor * float(self.cfg.noise_multiplier) + float(self.cfg.noise_margin))
+            thr_barge = max(thr_barge, thr_speech * 1.6)
+
+        if self.cfg.debug_rms and (now - self._last_debug_time) >= 1.0:
+            self._last_debug_time = now
+            logger.info(
+                f"[ORCH-{self.session_id}] rms={rms:.4f} thr_speech={thr_speech:.4f} thr_barge={thr_barge:.4f} "
+                f"noise={None if self._noise_rms is None else f'{self._noise_rms:.4f}'} "
+                f"in_speech={self._in_speech} tts={speaking}"
+            )
+
         if speaking:
             # While TTS is speaking, ignore mic audio unless barge-in is detected.
-            if rms >= self.cfg.rms_barge_in:
+            if rms >= thr_barge:
                 if self._barge_in_started_time is None:
                     self._barge_in_started_time = now
                 if (now - self._barge_in_started_time) * 1000.0 >= self.cfg.barge_in_ms:
@@ -216,7 +256,7 @@ class ConversationOrchestrator:
 
         self._barge_in_started_time = None
 
-        is_voice = rms >= self.cfg.rms_speech
+        is_voice = rms >= thr_speech
         if is_voice:
             if not self._in_speech:
                 self._begin_speech(now, sr)
@@ -309,6 +349,11 @@ class ConversationOrchestrator:
 
         # Resample to 16k mono
         try:
+            import resampy  # optional dependency for ASR path
+        except Exception as e:
+            logger.warning(f"[ORCH-{self.session_id}] resampy unavailable: {e}")
+            return
+        try:
             audio16 = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: resampy.resample(audio, sr_orig=sr_in, sr_new=self.cfg.sample_rate_out)
             )
@@ -350,6 +395,7 @@ class ConversationOrchestrator:
         # Kick off LLM streaming (turn-aware wrapper discards cancelled output)
         turn_nerfreal = _TurnAwareNerfreal(self, turn_id)
         try:
+            from llm import llm_response
             await asyncio.get_event_loop().run_in_executor(None, llm_response, text, turn_nerfreal, self.avatar_name)
         except Exception as e:
             logger.warning(f"[ORCH-{self.session_id}] LLM error: {e}")

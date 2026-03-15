@@ -20,7 +20,7 @@ from enum import Enum
 from io import BytesIO
 from queue import Queue
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Iterator, Optional
 
 import azure.cognitiveservices.speech as speechsdk
 import edge_tts
@@ -645,6 +645,8 @@ class TencentTTS(BaseTTS):
 
 class DoubaoTTS(BaseTTS):
     """DoubaoTTS - 简化稳定版"""
+    _VOICE_PROBE_CACHE: dict[str, bool] = {}
+    _VOICE_PROBE_CACHE_LOCK = threading.Lock()
 
     def __init__(self, opt, parent):
         super().__init__(opt, parent)
@@ -669,18 +671,12 @@ class DoubaoTTS(BaseTTS):
         if requested_sample_rate not in (8000, 16000, 24000, 48000):
             requested_sample_rate = 24000
 
-        self.connection_pool = DoubaoConnectionPool(
-            appid=self.appid,
-            token=self.access_key,
-            voice_id=self.voice_id,
-            resource_id=self.resource_id,
-            sample_rate=requested_sample_rate,
-            max_connections=10  # 增加连接池大小，支持更多并发请求
-        )
         self.api_sample_rate = requested_sample_rate  # 记录API采样率（若服务端不支持会导致重采样兜底）
-
+        self._fallback_voice_candidates = self._build_fallback_voice_candidates()
+        self._resolve_working_voice(prefer_different=False, force_refresh=False)
+        self.connection_pool = self._create_connection_pool()
         self.optimizer = None
-        self._processing_lock = threading.Lock()
+        self._processing_lock = threading.RLock()
         self._edge_fallback_voice = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
         self._edge_fallback_enabled = os.getenv("DOUBAO_TTS_EDGE_FALLBACK", "false").lower() in ("1", "true", "yes", "on")
         logger.info("[DOUBAO_TTS] 初始化完成")
@@ -700,6 +696,148 @@ class DoubaoTTS(BaseTTS):
     def _auto_integrate_optimizer(self):
         pass
 
+    def _create_connection_pool(self):
+        return DoubaoConnectionPool(
+            appid=self.appid,
+            token=self.access_key,
+            voice_id=self.voice_id,
+            resource_id=self.resource_id,
+            sample_rate=self.api_sample_rate,
+            max_connections=10
+        )
+
+    def _rebuild_connection_pool(self):
+        try:
+            if hasattr(self, "connection_pool") and self.connection_pool:
+                self.connection_pool.shutdown()
+        except Exception:
+            pass
+        self.connection_pool = self._create_connection_pool()
+        logger.info(
+            f"[DOUBAO_TTS] Connection pool rebuilt: voice_id={self.voice_id}, resource_id={self.resource_id}"
+        )
+
+    def _build_fallback_voice_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        configured = os.getenv("DOUBAO_FALLBACK_VOICE_IDS", "")
+        env_primary = (os.getenv("DOUBAO_VOICE_ID") or "").strip()
+        default_primary = "zh_female_tianxinxiaomei_emo_v2_mars_bigtts"
+        default_secondary = "zh_male_yangguangqingnian_mars_bigtts"
+        for item in [env_primary, default_primary, default_secondary, configured]:
+            if not item:
+                continue
+            if "," in item:
+                parts = [part.strip() for part in item.split(",") if part.strip()]
+            else:
+                parts = [item.strip()]
+            for part in parts:
+                if part and part not in candidates:
+                    candidates.append(part)
+        return candidates
+
+    def _resource_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        configured = (self.resource_id or "").strip()
+        if configured:
+            candidates.append(configured)
+        env_candidates = (os.getenv("DOUBAO_RESOURCE_ID_CANDIDATES") or "").strip()
+        if env_candidates:
+            for item in env_candidates.split(","):
+                item = item.strip()
+                if item and item not in candidates:
+                    candidates.append(item)
+        for default_resource in ("volc.service_type.10029", "seed-tts-1.0"):
+            if default_resource not in candidates:
+                candidates.append(default_resource)
+        return candidates
+
+    def _voice_probe_cache_get(self, key: str) -> Optional[bool]:
+        with DoubaoTTS._VOICE_PROBE_CACHE_LOCK:
+            return DoubaoTTS._VOICE_PROBE_CACHE.get(key)
+
+    def _voice_probe_cache_set(self, key: str, value: bool):
+        with DoubaoTTS._VOICE_PROBE_CACHE_LOCK:
+            DoubaoTTS._VOICE_PROBE_CACHE[key] = value
+
+    def _probe_voice_with_resource(self, voice_id: str, resource_id: str) -> bool:
+        if not self.appid or not self.access_key:
+            return False
+        conn = DoubaoWebSocketConnection(
+            self.appid,
+            self.access_key,
+            voice_id,
+            resource_id=resource_id,
+            sample_rate=self.api_sample_rate
+        )
+        try:
+            if not conn.connect():
+                return False
+            reqid = str(uuid.uuid4())
+            if not conn.send_text_request("你好", reqid, context_texts=[]):
+                return False
+
+            deadline = time.time() + 4.0
+            while time.time() < deadline:
+                chunk = conn.receive_audio_chunk(timeout=1.0)
+                if chunk is None:
+                    break
+                if isinstance(chunk, bytes) and len(chunk) > 0:
+                    return True
+            return False
+        except Exception:
+            return False
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _resolve_working_voice(self, prefer_different: bool = False, force_refresh: bool = False) -> bool:
+        current_voice = (self.voice_id or "").strip()
+        candidates = [current_voice] + [v for v in self._fallback_voice_candidates if v and v != current_voice]
+        if prefer_different:
+            candidates = [v for v in candidates if v != current_voice] + ([current_voice] if current_voice else [])
+        candidates = [v for v in candidates if v]
+        if not candidates:
+            return False
+
+        original_voice = self.voice_id
+        original_resource = self.resource_id
+        resource_candidates = self._resource_candidates()
+
+        for voice_id in candidates:
+            for resource_id in resource_candidates:
+                cache_key = f"{voice_id}|{resource_id}"
+                cached = None if force_refresh else self._voice_probe_cache_get(cache_key)
+                if cached is False:
+                    continue
+                if cached is True:
+                    self.voice_id = voice_id
+                    self.resource_id = resource_id
+                    self.opt.REF_FILE = voice_id
+                    logger.info(
+                        f"[DOUBAO_TTS] Use cached healthy voice-resource: voice_id={voice_id}, resource_id={resource_id}"
+                    )
+                    return True
+
+                ok = self._probe_voice_with_resource(voice_id, resource_id)
+                self._voice_probe_cache_set(cache_key, ok)
+                if ok:
+                    self.voice_id = voice_id
+                    self.resource_id = resource_id
+                    self.opt.REF_FILE = voice_id
+                    logger.info(
+                        f"[DOUBAO_TTS] Voice-resource probe success: voice_id={voice_id}, resource_id={resource_id}"
+                    )
+                    return True
+
+        self.voice_id = original_voice
+        self.resource_id = original_resource
+        logger.error(
+            f"[DOUBAO_TTS] No working Doubao voice found. keep voice_id={self.voice_id}, resource_id={self.resource_id}"
+        )
+        return False
+
     def _run_edge_fallback(self, text: str, textevent: dict):
         if not self._edge_fallback_enabled:
             return
@@ -718,7 +856,7 @@ class DoubaoTTS(BaseTTS):
             except Exception:
                 pass
 
-    def txt_to_audio(self, msg: tuple[str, dict]):
+    def _txt_to_audio_impl(self, msg: tuple[str, dict], retried: bool = False):
         text, textevent = msg
 
         if not text.strip():
@@ -730,7 +868,11 @@ class DoubaoTTS(BaseTTS):
             conn = self.connection_pool.get_connection()
             if not conn:
                 logger.error("[DOUBAO_TTS] 无法获取连接")
-                self._run_edge_fallback(text, textevent)
+                if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                    self._rebuild_connection_pool()
+                    self._txt_to_audio_impl(msg, retried=True)
+                else:
+                    self._run_edge_fallback(text, textevent)
                 return
 
             try:
@@ -738,7 +880,11 @@ class DoubaoTTS(BaseTTS):
                 if not conn.send_text_request(text, reqid, context_texts=[]):
                     logger.error("[DOUBAO_TTS] 发送请求失败")
                     self.connection_pool.return_connection(conn)
-                    self._run_edge_fallback(text, textevent)
+                    if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                        self._rebuild_connection_pool()
+                        self._txt_to_audio_impl(msg, retried=True)
+                    else:
+                        self._run_edge_fallback(text, textevent)
                     return
 
                 # 简化的流式处理
@@ -886,8 +1032,13 @@ class DoubaoTTS(BaseTTS):
                     self.parent.put_audio_frame(
                         np.zeros(chunk_size, dtype=np.float32), eventpoint)
                 else:
-                    logger.warning("[DOUBAO_TTS] No audio chunks sent, switching to Edge fallback")
-                    self._run_edge_fallback(text, textevent)
+                    logger.warning("[DOUBAO_TTS] No audio chunks sent")
+                    if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                        self._rebuild_connection_pool()
+                        self._txt_to_audio_impl(msg, retried=True)
+                    else:
+                        logger.warning("[DOUBAO_TTS] Doubao retry failed, switching to Edge fallback")
+                        self._run_edge_fallback(text, textevent)
 
                 logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个chunk")
 
@@ -895,7 +1046,14 @@ class DoubaoTTS(BaseTTS):
                 logger.error(f"[DOUBAO_TTS] 异常: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
-                self._run_edge_fallback(text, textevent)
+                if not retried and self._resolve_working_voice(prefer_different=True, force_refresh=True):
+                    self._rebuild_connection_pool()
+                    self._txt_to_audio_impl(msg, retried=True)
+                else:
+                    self._run_edge_fallback(text, textevent)
+
+    def txt_to_audio(self, msg: tuple[str, dict]):
+        self._txt_to_audio_impl(msg, retried=False)
 
     def get_stats(self):
         """获取统计信息"""
@@ -946,18 +1104,10 @@ class DoubaoWebSocketConnection:
         self.lock = threading.Lock()
 
     def _get_resource_id(self) -> str:
-        """获取资源ID - 根据音色ID自动匹配正确的resource_id"""
-        voice = (self.voice_id or "").strip()
+        """获取资源ID - 优先使用已选择的 resource_id"""
         resource = (self.resource_id or "").strip()
         if resource:
-            # zh_* / BV* 音色在错误 resource_id 下会直接无声或回退，强制纠偏到默认值
-            if (voice.startswith('BV') or voice.startswith('zh_')) and resource != "volc.service_type.10029":
-                logger.warning(
-                    f"[DOUBAO_TTS] voice_id={voice} 与 resource_id={resource} 不匹配，自动改用 volc.service_type.10029"
-                )
-                return "volc.service_type.10029"
             return resource
-        # 默认值
         return "volc.service_type.10029"
 
     def connect(self) -> bool:

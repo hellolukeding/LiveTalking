@@ -100,6 +100,10 @@ USE_PROCESS_ISOLATION = os.getenv("USE_PROCESS_ISOLATION", "true").lower() == "t
 logger.info(f"[APP] Process isolation: {USE_PROCESS_ISOLATION}")
 model = None
 avatar = None
+DEFAULT_DOUBAO_VOICE_ID = os.getenv(
+    "DOUBAO_VOICE_ID",
+    "zh_female_tianxinxiaomei_emo_v2_mars_bigtts"
+)
 
 def _normalize_tts_type(tts_type: str) -> str:
     raw = (tts_type or "").strip().lower()
@@ -139,7 +143,7 @@ def _load_avatar_meta_for_proxy(avatar_id: str):
     from pathlib import Path
 
     avatar_name = avatar_id
-    voice_id = getattr(opt, 'REF_FILE', 'zh_female_xiaohe_uranus_bigtts')
+    voice_id = getattr(opt, 'REF_FILE', DEFAULT_DOUBAO_VOICE_ID)
     tts_type = _normalize_tts_type(getattr(opt, "tts", "doubao"))
     try:
         meta_path = Path(f"./data/avatars/{avatar_id}/meta.json")
@@ -495,7 +499,7 @@ def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
     import json
     meta_path = f"./data/avatars/{avatar_id}/meta.json"
     avatar_name = avatar_id  # 默认使用 avatar_id
-    voice_id = getattr(opt_copy, 'REF_FILE', 'zh_female_xiaohe_uranus_bigtts')  # 默认语音（豆包模型2.0）
+    voice_id = getattr(opt_copy, 'REF_FILE', DEFAULT_DOUBAO_VOICE_ID)
     tts_type = _normalize_tts_type(getattr(opt_copy, "tts", "doubao"))
     try:
         with open(meta_path, 'r', encoding='utf-8') as f:
@@ -1587,7 +1591,7 @@ async def avatar_create(request):
         avatar_id = None
         name = None
         tts_type = "doubao"  # 默认使用 doubao
-        voice_id = "zh_female_xiaohe_uranus_bigtts"  # 默认语音（豆包模型2.0）
+        voice_id = DEFAULT_DOUBAO_VOICE_ID
         video_path = None
 
         async for field in reader:
@@ -1944,8 +1948,8 @@ if __name__ == '__main__':
     # xtts gpt-sovits cosyvoice fishtts tencent doubao indextts2 azuretts edgetts
     parser.add_argument('--tts', type=str, default=os.getenv('TTS_TYPE', 'edgetts'),
                         help="tts service type (from env TTS_TYPE)")
-    parser.add_argument('--REF_FILE', type=str, default="zh_female_xiaohe_uranus_bigtts",
-                        help="参考文件名或语音模型ID，对于豆包TTS使用voice_id，如zh_female_xiaohe_uranus_bigtts（豆包模型2.0）")
+    parser.add_argument('--REF_FILE', type=str, default=DEFAULT_DOUBAO_VOICE_ID,
+                        help="参考文件名或语音模型ID，对于豆包TTS使用voice_id，例如 zh_female_tianxinxiaomei_emo_v2_mars_bigtts")
     parser.add_argument('--REF_TEXT', type=str, default=None)
     # http://localhost:9000
     parser.add_argument('--TTS_SERVER', type=str,

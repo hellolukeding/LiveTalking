@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+DEFAULT_DOUBAO_VOICE_ID = os.getenv(
+    "DOUBAO_VOICE_ID",
+    "zh_female_tianxinxiaomei_emo_v2_mars_bigtts"
+)
 
 
 def validate_avatar_id(avatar_id: str) -> bool:
@@ -100,7 +104,7 @@ def _default_meta(avatar_id: str, name: str) -> dict:
         "avatar_id": avatar_id,
         "name": name,
         "tts_type": "doubao",  # Changed from "edge"
-        "voice_id": "zh_female_wenroushunshun_mars_bigtts",  # Changed default
+        "voice_id": DEFAULT_DOUBAO_VOICE_ID,
         "created_at": datetime.now().isoformat(),
         "status": "ready",   # creating | ready | error
         "error": None,
@@ -210,7 +214,7 @@ def delete_avatar(avatar_id: str) -> bool:
 
 def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
                          tts_type: str = "doubao",  # Changed default
-                         voice_id: str = "zh_female_wenroushunshun_mars_bigtts"):  # Changed default
+                         voice_id: str = DEFAULT_DOUBAO_VOICE_ID):
     """
     同步调用 wav2lip/genavatar384.py 生成数字人形象。
     此函数在后台线程中执行，会修改 meta.json 中的 status 字段。
@@ -305,7 +309,7 @@ def generate_avatar_sync(avatar_id: str, video_path: str, name: str,
 
 async def generate_avatar_async(avatar_id: str, video_path: str, name: str,
                                  tts_type: str = "doubao",  # Changed default
-                                 voice_id: str = "zh_female_wenroushunshun_mars_bigtts"):  # Changed default
+                                 voice_id: str = DEFAULT_DOUBAO_VOICE_ID):
     """在 executor 线程中异步运行 generate_avatar_sync。"""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(

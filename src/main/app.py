@@ -734,7 +734,8 @@ async def offer(request):
                 # 将接收到的音频交给编排器（VAD->ASR->LLM->TTS）
                 try:
                     nerfreal = nerfreals.get(sessionid)
-                    if nerfreal:
+                    channel = getattr(nerfreal, "datachannel", None) if nerfreal else None
+                    if nerfreal and channel and getattr(channel, "readyState", None) == "open":
                         nerfreal.send_custom_msg("ASR_UPSTREAM_READY")
                 except Exception as e:
                     logger.debug(f"[WEBRTC] Failed to send ASR_UPSTREAM_READY(on_track) for session {sessionid}: {e}")
@@ -777,9 +778,13 @@ async def offer(request):
                                     upstream_notified = True
                                     try:
                                         nerfreal = nerfreals.get(sessionid)
-                                        if nerfreal:
+                                        channel = getattr(nerfreal, "datachannel", None) if nerfreal else None
+                                        if nerfreal and channel and getattr(channel, "readyState", None) == "open":
                                             nerfreal.send_custom_msg("ASR_UPSTREAM_READY")
+                                        else:
+                                            upstream_notified = False
                                     except Exception as e:
+                                        upstream_notified = False
                                         logger.debug(f"[WEBRTC] Failed to send ASR_UPSTREAM_READY for session {sessionid}: {e}")
                     except Exception as e:
                         logger.error(

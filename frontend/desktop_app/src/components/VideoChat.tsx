@@ -448,8 +448,11 @@ export default function VideoChat() {
         let cancelled = false;
 
         const startASR = async () => {
-            if (!isVoiceChatOn || !isStarted) {
-                stopBackendASR();
+            if (!isVoiceChatOn) {
+                stopBackendASR('voice_chat_off');
+                return;
+            }
+            if (!isStarted) {
                 return;
             }
 
@@ -718,7 +721,7 @@ export default function VideoChat() {
 
     // 发送音频到后端进行识别（保留这个函数以防被其他地方调用）
     // 停止后端 ASR
-    const stopBackendASR = () => {
+    const stopBackendASR = (reason: string = 'unknown') => {
         const hadActiveASR = Boolean(
             mediaRecorderRef.current ||
             micPermissionStreamRef.current ||
@@ -796,7 +799,7 @@ export default function VideoChat() {
         }
 
         if (hadActiveASR) {
-            console.log('[ASR] Backend ASR stopped');
+            console.log('[ASR] Backend ASR stopped:', reason);
         }
     };
 
@@ -1031,7 +1034,7 @@ export default function VideoChat() {
     };
 
     const stop = () => {
-        stopBackendASR();
+        stopBackendASR('stop_call');
 
         if (pcRef.current) {
             pcRef.current.close();
@@ -1149,7 +1152,7 @@ export default function VideoChat() {
                 clearTimeout(upstreamReadyTimerRef.current);
             }
             // 清理后端 ASR 资源
-            stopBackendASR();
+            stopBackendASR('unmount');
             cleanupSilentUpstreamTrack();
         }
     }, []);

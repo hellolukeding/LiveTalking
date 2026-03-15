@@ -31,6 +31,37 @@ def _json_dumps(obj):
     return json.dumps(obj)
 
 
+def _resolve_resource_id(voice_id: str) -> str:
+    configured = (DOUBAO_RESOURCE_ID or "").strip()
+    voice = (voice_id or "").strip()
+
+    if configured:
+        # 标准音色 + 不匹配 resource_id 容易失败，优先切回默认 service_type
+        if voice.startswith("BV") and configured != "volc.service_type.10029":
+            return "volc.service_type.10029"
+        return configured
+
+    # 未配置时根据音色做兜底
+    if voice.startswith("BV") or voice.startswith("zh_") or voice.startswith("S_"):
+        return "volc.service_type.10029"
+    return "volc.service_type.10029"
+
+
+def pcm16le_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 16000, channels: int = 1) -> bytes:
+    if not pcm_bytes:
+        return b""
+    import io
+    import wave
+
+    with io.BytesIO() as buffer:
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_bytes)
+        return buffer.getvalue()
+
+
 async def generate_preview_audio(text: str, voice_id: str) -> bytes:
     """
     Generate audio using Doubao TTS for voice preview
@@ -46,8 +77,8 @@ async def generate_preview_audio(text: str, voice_id: str) -> bytes:
         logger.error("[TTS] Required imports not available")
         return None
 
-    if not all([DOUBAO_APPID, DOUBAO_ACCESS_TOKEN, DOUBAO_RESOURCE_ID]):
-        logger.error("[TTS] Missing Doubao credentials (DOUBAO_APPID, DOUBAO_ACCESS_TOKEN, DOUBAO_RESOURCE_ID)")
+    if not all([DOUBAO_APPID, DOUBAO_ACCESS_TOKEN]):
+        logger.error("[TTS] Missing Doubao credentials (DOUBAO_APPID, DOUBAO_ACCESS_TOKEN)")
         return None
 
     try:
@@ -79,14 +110,15 @@ def _sync_generate_audio(text: str, voice_id: str) -> bytes:
     ws = None
     try:
         # Build WebSocket headers
+        resource_id = _resolve_resource_id(voice_id)
         headers = [
             f"X-Api-App-Key: {DOUBAO_APPID}",
             f"X-Api-Access-Key: {DOUBAO_ACCESS_TOKEN}",
-            f"X-Api-Resource-Id: {DOUBAO_RESOURCE_ID}",
+            f"X-Api-Resource-Id: {resource_id}",
             f"X-Api-Connect-Id: {str(uuid.uuid4())}",
         ]
 
-        logger.info(f"[TTS] Connecting to Doubao API with voice_id={voice_id}")
+        logger.info(f"[TTS] Connecting to Doubao API with voice_id={voice_id}, resource_id={resource_id}")
 
         # Connect to Doubao API with timeout
         ws = websocket.create_connection(

@@ -76,6 +76,10 @@ from services.avatar_manager import (
 )
 
 load_dotenv()
+try:
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
+except Exception:
+    pass
 
 # import gevent
 # from gevent import pywsgi
@@ -97,21 +101,57 @@ logger.info(f"[APP] Process isolation: {USE_PROCESS_ISOLATION}")
 model = None
 avatar = None
 
+def _normalize_tts_type(tts_type: str) -> str:
+    raw = (tts_type or "").strip().lower()
+    if raw in ("edge", "edgetts"):
+        return "edgetts"
+    if raw in ("azure", "azuretts"):
+        return "azuretts"
+    if raw in ("doubao", "tencent", "cosyvoice", "fishtts", "indextts2", "xtts", "gpt-sovits"):
+        return raw
+    return raw or "doubao"
+
+
+def _infer_tts_type_from_voice(voice_id: str, fallback: str = "doubao") -> str:
+    voice = (voice_id or "").strip()
+    if not voice:
+        return _normalize_tts_type(fallback)
+
+    lower_voice = voice.lower()
+
+    # 豆包常见音色格式：zh_* / BV* / S_*
+    if voice.startswith("zh_") or voice.startswith("BV") or voice.startswith("S_") or "_mars_" in lower_voice:
+        return "doubao"
+
+    # Edge 常见音色格式：zh-CN-XiaoxiaoNeural
+    if "-neural" in lower_voice:
+        return "edgetts"
+
+    # 腾讯常见为纯数字 voice type
+    if voice.isdigit():
+        return "tencent"
+
+    return _normalize_tts_type(fallback)
+
+
 def _load_avatar_meta_for_proxy(avatar_id: str):
     import json
     from pathlib import Path
 
     avatar_name = avatar_id
     voice_id = getattr(opt, 'REF_FILE', 'zh_female_xiaohe_uranus_bigtts')
+    tts_type = _normalize_tts_type(getattr(opt, "tts", "doubao"))
     try:
         meta_path = Path(f"./data/avatars/{avatar_id}/meta.json")
         if meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             avatar_name = meta.get("name", avatar_name)
             voice_id = meta.get("voice_id", voice_id)
+            tts_type = _normalize_tts_type(meta.get("tts_type", tts_type))
     except Exception as e:
         logger.warning(f"[BUILD] Failed to load meta.json for {avatar_id}: {e}")
-    return avatar_name, voice_id
+    tts_type = _infer_tts_type_from_voice(voice_id, tts_type)
+    return avatar_name, voice_id, tts_type
 
 
 class SubprocessNerfrealProxy:
@@ -121,10 +161,11 @@ class SubprocessNerfrealProxy:
     - is_speaking 读取共享 speaking_value
     """
 
-    def __init__(self, session, avatar_name: str, voice_id: str):
+    def __init__(self, session, avatar_name: str, voice_id: str, tts_type: str = "doubao"):
         self._session = session
         self.avatar_name = avatar_name
         self.voice_id = voice_id
+        self.tts_type = _normalize_tts_type(tts_type)
         self.datachannel = None
         self.loop = None
 
@@ -455,18 +496,24 @@ def build_nerfreal(sessionid: int, avatar_id: str) -> BaseReal:
     meta_path = f"./data/avatars/{avatar_id}/meta.json"
     avatar_name = avatar_id  # 默认使用 avatar_id
     voice_id = getattr(opt_copy, 'REF_FILE', 'zh_female_xiaohe_uranus_bigtts')  # 默认语音（豆包模型2.0）
+    tts_type = _normalize_tts_type(getattr(opt_copy, "tts", "doubao"))
     try:
         with open(meta_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
             avatar_name = meta.get('name', avatar_id)
             voice_id = meta.get('voice_id', voice_id)
+            tts_type = _normalize_tts_type(meta.get("tts_type", tts_type))
     except Exception as e:
         logger.warning(f"[BUILD] Failed to load meta.json for {avatar_id}: {e}")
 
     # 设置 voice_id 到 opt.REF_FILE（TTS 使用）
     opt_copy.REF_FILE = voice_id
+    opt_copy.tts = _infer_tts_type_from_voice(voice_id, tts_type)
 
-    logger.info(f"[BUILD] Loaded avatar for session {sessionid}: {avatar_id}, name: {avatar_name}, voice_id: {voice_id}")
+    logger.info(
+        f"[BUILD] Loaded avatar for session {sessionid}: {avatar_id}, "
+        f"name: {avatar_name}, voice_id: {voice_id}, tts={opt_copy.tts}"
+    )
 
     if opt_copy.model == 'wav2lip':
         from lipreal import load_avatar, LipReal
@@ -598,11 +645,14 @@ async def offer(request):
                 logger.info(f"[OFFER] Session {sessionid} created with pid={session.pid}")
                 
                 # 进程隔离：主进程不再构建 nerfreal（避免“控制面/数据面”错位）
-                avatar_name, voice_id = _load_avatar_meta_for_proxy(avatar_id)
-                proxy = SubprocessNerfrealProxy(session, avatar_name, voice_id)
+                avatar_name, voice_id, tts_type = _load_avatar_meta_for_proxy(avatar_id)
+                proxy = SubprocessNerfrealProxy(session, avatar_name, voice_id, tts_type)
                 async with nerfreals_lock:
                     nerfreals[sessionid] = proxy
-                logger.info(f"[OFFER] Proxy installed for session {sessionid}: avatar={avatar_name}, voice_id={voice_id}")
+                logger.info(
+                    f"[OFFER] Proxy installed for session {sessionid}: "
+                    f"avatar={avatar_name}, voice_id={voice_id}, tts={tts_type}"
+                )
                 try:
                     session_orchestrators[sessionid] = ConversationOrchestrator(sessionid, proxy, opt, avatar_name=avatar_name)
                 except Exception as e:
@@ -1668,7 +1718,7 @@ async def avatar_delete(request):
 async def preview_voice_tts(request):
     """
     生成音色试听音频
-    Returns: Audio data (audio/mpeg)
+    Returns: Audio data (audio/wav)
     """
     try:
         params = await request.json()
@@ -1691,7 +1741,7 @@ async def preview_voice_tts(request):
             )
 
         # Call Doubao TTS service to generate preview audio
-        from tts_service import generate_preview_audio
+        from tts_service import generate_preview_audio, pcm16le_to_wav_bytes
 
         audio_data = await generate_preview_audio(
             text="你好，我是数字人。",  # Fixed preview text
@@ -1705,9 +1755,17 @@ async def preview_voice_tts(request):
                 status=500
             )
 
+        wav_audio = pcm16le_to_wav_bytes(audio_data, sample_rate=16000, channels=1)
+        if not wav_audio:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "Failed to convert preview audio"}),
+                status=500
+            )
+
         return web.Response(
-            body=audio_data,
-            content_type='audio/mpeg'
+            body=wav_audio,
+            content_type='audio/wav'
         )
 
     except Exception as e:

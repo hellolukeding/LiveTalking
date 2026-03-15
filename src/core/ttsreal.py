@@ -681,6 +681,8 @@ class DoubaoTTS(BaseTTS):
 
         self.optimizer = None
         self._processing_lock = threading.Lock()
+        self._edge_fallback_voice = os.getenv("EDGE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+        self._edge_fallback_enabled = os.getenv("DOUBAO_TTS_EDGE_FALLBACK", "true").lower() in ("1", "true", "yes", "on")
         logger.info("[DOUBAO_TTS] 初始化完成")
         self.debug_wav = None
         if os.getenv("DOUBAO_TTS_DEBUG_WAV", "0") == "1":
@@ -698,6 +700,24 @@ class DoubaoTTS(BaseTTS):
     def _auto_integrate_optimizer(self):
         pass
 
+    def _run_edge_fallback(self, text: str, textevent: dict):
+        if not self._edge_fallback_enabled:
+            return
+        original_ref = getattr(self.opt, "REF_FILE", None)
+        try:
+            self.opt.REF_FILE = self._edge_fallback_voice
+            logger.warning(
+                f"[DOUBAO_TTS] Fallback to EdgeTTS voice={self._edge_fallback_voice}, text={text[:40]}..."
+            )
+            EdgeTTS(self.opt, self.parent).txt_to_audio((text, textevent))
+        except Exception as e:
+            logger.error(f"[DOUBAO_TTS] Edge fallback failed: {e}")
+        finally:
+            try:
+                self.opt.REF_FILE = original_ref
+            except Exception:
+                pass
+
     def txt_to_audio(self, msg: tuple[str, dict]):
         text, textevent = msg
 
@@ -710,6 +730,7 @@ class DoubaoTTS(BaseTTS):
             conn = self.connection_pool.get_connection()
             if not conn:
                 logger.error("[DOUBAO_TTS] 无法获取连接")
+                self._run_edge_fallback(text, textevent)
                 return
 
             try:
@@ -717,6 +738,7 @@ class DoubaoTTS(BaseTTS):
                 if not conn.send_text_request(text, reqid, context_texts=[]):
                     logger.error("[DOUBAO_TTS] 发送请求失败")
                     self.connection_pool.return_connection(conn)
+                    self._run_edge_fallback(text, textevent)
                     return
 
                 # 简化的流式处理
@@ -863,6 +885,9 @@ class DoubaoTTS(BaseTTS):
                     eventpoint.update(textevent)
                     self.parent.put_audio_frame(
                         np.zeros(chunk_size, dtype=np.float32), eventpoint)
+                else:
+                    logger.warning("[DOUBAO_TTS] No audio chunks sent, switching to Edge fallback")
+                    self._run_edge_fallback(text, textevent)
 
                 logger.info(f"[DOUBAO_TTS] 完成: 发送 {total_sent} 个chunk")
 
@@ -870,6 +895,7 @@ class DoubaoTTS(BaseTTS):
                 logger.error(f"[DOUBAO_TTS] 异常: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
+                self._run_edge_fallback(text, textevent)
 
     def get_stats(self):
         """获取统计信息"""

@@ -136,7 +136,23 @@ class BaseReal:
         # - True: send TTS PCM directly to WebRTC audio queue in put_audio_frame()
         #         to avoid coupling audio continuity to video inference latency.
         # - False: keep legacy path (audio emitted from process_frames()).
-        self._direct_tts_audio_out = os.getenv("DIRECT_TTS_AUDIO_OUT", "false").lower() in ("1", "true", "yes", "on")
+        # Default to True for WebRTC stability; allow legacy path only when explicitly requested.
+        direct_env = os.getenv("DIRECT_TTS_AUDIO_OUT", "").strip().lower()
+        if direct_env:
+            direct_enabled = direct_env in ("1", "true", "yes", "on")
+        else:
+            direct_enabled = True
+
+        allow_legacy_path = os.getenv("ALLOW_LEGACY_AUDIO_PATH", "false").lower() in ("1", "true", "yes", "on")
+        use_process_isolation = os.getenv("USE_PROCESS_ISOLATION", "true").lower() in ("1", "true", "yes", "on")
+        if (not direct_enabled) and use_process_isolation and (not allow_legacy_path):
+            logger.warning(
+                "[BaseReal] DIRECT_TTS_AUDIO_OUT is disabled but process isolation is enabled; "
+                "forcing direct audio out to reduce stutter/drop. Set ALLOW_LEGACY_AUDIO_PATH=true to keep legacy path."
+            )
+            direct_enabled = True
+
+        self._direct_tts_audio_out = direct_enabled
 
     @property
     def _render_quit_event(self):
@@ -351,8 +367,29 @@ class BaseReal:
         with self._tts_lock:
             if self._tts_initialized:
                 return
-            logger.info(f"[BaseReal] 延迟初始化 TTS: type={self.opt.tts}")
-            tts_type = self.opt.tts
+            tts_type = (getattr(self.opt, "tts", "doubao") or "doubao").strip().lower()
+            voice_id = (getattr(self.opt, "REF_FILE", "") or "").strip()
+            voice_lower = voice_id.lower()
+            if tts_type in ("edge",):
+                tts_type = "edgetts"
+            if tts_type in ("azure",):
+                tts_type = "azuretts"
+
+            # 兜底纠偏：如果 voice_id 明显是豆包音色，但 tts_type 被错误配置成其他引擎，会直接无声。
+            looks_like_doubao_voice = (
+                voice_id.startswith("zh_")
+                or voice_id.startswith("BV")
+                or voice_id.startswith("S_")
+                or "_mars_" in voice_lower
+            )
+            if looks_like_doubao_voice and tts_type not in ("doubao",):
+                logger.warning(
+                    f"[BaseReal] TTS type mismatch fixed: tts={tts_type} -> doubao for voice_id={voice_id}"
+                )
+                tts_type = "doubao"
+                self.opt.tts = tts_type
+
+            logger.info(f"[BaseReal] 延迟初始化 TTS: type={tts_type}, voice_id={voice_id}")
             if tts_type == "doubao":
                 self.tts = DoubaoTTS(self.opt, self)
             elif tts_type == "edgetts":

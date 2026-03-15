@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 # 为子进程添加文件日志
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 子进程兜底加载项目根目录 .env（避免从非项目目录启动时拿不到 TTS/ASR 配置）
+try:
+    project_root = Path(__file__).resolve().parents[2]
+    load_dotenv(project_root / ".env")
+except Exception:
+    pass
+
 if os.getpid() != os.getppid():  # 如果是子进程
     log_file = f"/tmp/session_{os.getpid()}.log"
     file_handler = logging.FileHandler(log_file)
@@ -626,7 +636,31 @@ def build_nerfreal_subprocess(session_id: str, avatar_id: str, opt: Any):
     model = build_nerfreal_subprocess._model
 
     # 读取 avatar meta.json（设置 avatar_name / voice_id）
+    def _normalize_tts_type(tts_type: str) -> str:
+        raw = (tts_type or "").strip().lower()
+        if raw in ("edge", "edgetts"):
+            return "edgetts"
+        if raw in ("azure", "azuretts"):
+            return "azuretts"
+        if raw in ("doubao", "tencent", "cosyvoice", "fishtts", "indextts2", "xtts", "gpt-sovits"):
+            return raw
+        return raw or "doubao"
+
+    def _infer_tts_type_from_voice(voice_id: str, fallback: str = "doubao") -> str:
+        voice = (voice_id or "").strip()
+        if not voice:
+            return _normalize_tts_type(fallback)
+        lower_voice = voice.lower()
+        if voice.startswith("zh_") or voice.startswith("BV") or voice.startswith("S_") or "_mars_" in lower_voice:
+            return "doubao"
+        if "-neural" in lower_voice:
+            return "edgetts"
+        if voice.isdigit():
+            return "tencent"
+        return _normalize_tts_type(fallback)
+
     avatar_name = avatar_id
+    tts_type = _normalize_tts_type(getattr(opt, "tts", "doubao"))
     try:
         meta_path = Path("./data/avatars") / avatar_id / "meta.json"
         if meta_path.exists():
@@ -635,8 +669,14 @@ def build_nerfreal_subprocess(session_id: str, avatar_id: str, opt: Any):
             voice_id = meta.get("voice_id")
             if voice_id:
                 opt.REF_FILE = voice_id
+            tts_type = _normalize_tts_type(meta.get("tts_type", tts_type))
     except Exception as e:
         logger.warning(f"[Session-{session_id}] Failed to load avatar meta.json: {e}")
+
+    opt.tts = _infer_tts_type_from_voice(getattr(opt, "REF_FILE", ""), tts_type)
+    logger.info(
+        f"[Session-{session_id}] TTS resolved: tts={opt.tts}, voice_id={getattr(opt, 'REF_FILE', '')}"
+    )
 
     # 加载 avatar (load_avatar 返回 4 个值，只传前 3 个给 LipReal)
     frame_list, face_list, coord_list, _ = load_avatar(avatar_id)

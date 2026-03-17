@@ -52,6 +52,7 @@ interface LocalASRState {
 }
 
 const TTS_FALLBACK_TIMEOUT_MS = 2500;
+const TTS_END_SIGNAL_GRACE_MS = Number(import.meta.env.VITE_TTS_END_SIGNAL_GRACE_MS ?? 700);
 const USE_WEBRTC_UPSTREAM_ASR = String(import.meta.env.VITE_USE_WEBRTC_UPSTREAM_ASR ?? 'true').toLowerCase() === 'true';
 const AUTO_DISCONNECT_MS = Number(import.meta.env.VITE_AUTO_DISCONNECT_MS ?? 0);
 const LOCAL_ASR_MIN_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_MIN_UTTERANCE_MS ?? 450);
@@ -210,6 +211,16 @@ export default function VideoChat() {
             console.log('[State] AI stopped speaking (fallback timeout)');
             setStateListening();
         }, TTS_FALLBACK_TIMEOUT_MS);
+    };
+
+    const scheduleTTSCompletion = () => {
+        if (aiSpeakingTimeoutRef.current) {
+            clearTimeout(aiSpeakingTimeoutRef.current);
+        }
+        aiSpeakingTimeoutRef.current = setTimeout(() => {
+            console.log('[State] AI stopped speaking (end signal debounce)');
+            setStateListening();
+        }, TTS_END_SIGNAL_GRACE_MS);
     };
 
     const extendTTSPlaying = () => {
@@ -1141,7 +1152,7 @@ export default function VideoChat() {
                         }
                         if (parsed.status === 'end') {
                             console.log('[DataChannel] Received TTS end signal:', parsed);
-                            setStateListening();
+                            scheduleTTSCompletion();
                             return;
                         }
                     }

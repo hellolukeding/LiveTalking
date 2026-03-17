@@ -64,6 +64,7 @@ class VADConfig:
     dedup_window_ms: int = 1500
     barge_in_ms: int = 90
     barge_in_preroll_ms: int = 320
+    tts_queue_hold_ms: int = 1200
     enable_orchestrator: bool = True
     noise_adapt: bool = True
     noise_alpha: float = 0.05
@@ -88,6 +89,7 @@ class VADConfig:
             dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 1500),
             barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 90),
             barge_in_preroll_ms=_env_int("ORCH_BARGE_IN_PREROLL_MS", 320),
+            tts_queue_hold_ms=_env_int("ORCH_TTS_QUEUE_HOLD_MS", 1200),
             enable_orchestrator=_env_bool("ORCH_ENABLED", True),
             noise_adapt=_env_bool("ORCH_VAD_NOISE_ADAPT", True),
             noise_alpha=_env_float("ORCH_VAD_NOISE_ALPHA", 0.05),
@@ -113,6 +115,12 @@ class _TurnAwareNerfreal:
             return
         self._orch.say(msg, datainfo)
 
+    def get_conversation_memory_holder(self):
+        return self._orch
+
+    def should_persist_conversation_turn(self) -> bool:
+        return self._orch.is_turn_active(self._turn_id)
+
 
 class ConversationOrchestrator:
     """
@@ -135,6 +143,7 @@ class ConversationOrchestrator:
 
         self._turn_id = 0
         self._turn_lock = asyncio.Lock()
+        self._tts_hold_until = 0.0
 
         self._last_asr_time = 0.0
         self._last_asr_text: Optional[str] = None
@@ -189,6 +198,7 @@ class ConversationOrchestrator:
             pass
 
     def interrupt(self):
+        self._tts_hold_until = 0.0
         try:
             if hasattr(self.nerfreal, "flush_talk"):
                 self.nerfreal.flush_talk()
@@ -196,6 +206,7 @@ class ConversationOrchestrator:
             pass
 
     def say(self, msg: str, datainfo: dict = {}):  # noqa: B006
+        self._tts_hold_until = time.perf_counter() + (self.cfg.tts_queue_hold_ms / 1000.0)
         try:
             if hasattr(self.nerfreal, "put_msg_txt"):
                 self.nerfreal.put_msg_txt(msg, datainfo)
@@ -203,6 +214,9 @@ class ConversationOrchestrator:
             pass
 
     def _is_tts_speaking(self) -> bool:
+        now = time.perf_counter()
+        if now < self._tts_hold_until:
+            return True
         try:
             if hasattr(self.nerfreal, "is_speaking"):
                 return bool(self.nerfreal.is_speaking())

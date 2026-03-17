@@ -55,8 +55,10 @@ class VADConfig:
     rms_speech: float = 0.0045
     rms_barge_in: float = 0.008
     rms_continue_ratio: float = 0.65
-    end_silence_ms: int = 300
-    min_utterance_ms: int = 240
+    end_silence_ms: int = 650
+    end_silence_short_ms: int = 900
+    short_utterance_ms: int = 1800
+    min_utterance_ms: int = 420
     max_utterance_ms: int = 8000
     cooldown_ms: int = 180
     dedup_window_ms: int = 1500
@@ -77,8 +79,10 @@ class VADConfig:
             rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.0045),
             rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.008),
             rms_continue_ratio=_env_float("ORCH_VAD_RMS_CONTINUE_RATIO", 0.65),
-            end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 300),
-            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 240),
+            end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 650),
+            end_silence_short_ms=_env_int("ORCH_VAD_END_SILENCE_SHORT_MS", 900),
+            short_utterance_ms=_env_int("ORCH_VAD_SHORT_UTTERANCE_MS", 1800),
+            min_utterance_ms=_env_int("ORCH_VAD_MIN_UTTERANCE_MS", 420),
             max_utterance_ms=_env_int("ORCH_VAD_MAX_UTTERANCE_MS", 8000),
             cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 180),
             dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 1500),
@@ -295,7 +299,15 @@ class ConversationOrchestrator:
         # Silence handling: endpoint if we were in speech and silence lasts long enough
         if self._in_speech and self._last_voice_time is not None:
             silence_ms = (now - self._last_voice_time) * 1000.0
-            if silence_ms >= self.cfg.end_silence_ms:
+            utterance_ms = 0.0
+            if self._speech_started_time is not None:
+                utterance_ms = (now - self._speech_started_time) * 1000.0
+            required_silence_ms = (
+                self.cfg.end_silence_short_ms
+                if utterance_ms < self.cfg.short_utterance_ms
+                else self.cfg.end_silence_ms
+            )
+            if utterance_ms >= self.cfg.min_utterance_ms and silence_ms >= required_silence_ms:
                 self._finalize_utterance(now)
 
     def _begin_speech(self, now: float, sr: int):

@@ -38,9 +38,48 @@ interface ASRBuffer {
     timestamp: number;
 }
 
+interface LocalASRState {
+    speechActive: boolean;
+    pendingVoiceFrames: number;
+    speechStartTs: number | null;
+    lastVoiceTs: number | null;
+    utteranceBuffers: Float32Array[];
+    utteranceSamples: number;
+    prerollBuffers: Float32Array[];
+    prerollSamples: number;
+    noiseFloor: number | null;
+    sampleRate: number;
+}
+
 const TTS_FALLBACK_TIMEOUT_MS = 2500;
-const USE_WEBRTC_UPSTREAM_ASR = String(import.meta.env.VITE_USE_WEBRTC_UPSTREAM_ASR ?? 'false').toLowerCase() === 'true';
+const USE_WEBRTC_UPSTREAM_ASR = String(import.meta.env.VITE_USE_WEBRTC_UPSTREAM_ASR ?? 'true').toLowerCase() === 'true';
 const AUTO_DISCONNECT_MS = Number(import.meta.env.VITE_AUTO_DISCONNECT_MS ?? 0);
+const LOCAL_ASR_MIN_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_MIN_UTTERANCE_MS ?? 450);
+const LOCAL_ASR_END_SILENCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_END_SILENCE_MS ?? 700);
+const LOCAL_ASR_END_SILENCE_SHORT_MS = Number(import.meta.env.VITE_LOCAL_ASR_END_SILENCE_SHORT_MS ?? 950);
+const LOCAL_ASR_SHORT_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_SHORT_UTTERANCE_MS ?? 1800);
+const LOCAL_ASR_MAX_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_MAX_UTTERANCE_MS ?? 10000);
+const LOCAL_ASR_BASE_RMS = Number(import.meta.env.VITE_LOCAL_ASR_BASE_RMS ?? 0.012);
+const LOCAL_ASR_CONTINUE_RATIO = Number(import.meta.env.VITE_LOCAL_ASR_CONTINUE_RATIO ?? 0.72);
+const LOCAL_ASR_NOISE_ALPHA = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_ALPHA ?? 0.03);
+const LOCAL_ASR_NOISE_MULTIPLIER = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_MULTIPLIER ?? 3.0);
+const LOCAL_ASR_NOISE_MARGIN = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_MARGIN ?? 0.0025);
+const LOCAL_ASR_START_FRAMES = Number(import.meta.env.VITE_LOCAL_ASR_START_FRAMES ?? 3);
+const LOCAL_ASR_PREROLL_MS = Number(import.meta.env.VITE_LOCAL_ASR_PREROLL_MS ?? 220);
+const LOCAL_ASR_PROCESSOR_BUFFER_SIZE = Number(import.meta.env.VITE_LOCAL_ASR_PROCESSOR_BUFFER_SIZE ?? 2048);
+
+const createInitialLocalASRState = (): LocalASRState => ({
+    speechActive: false,
+    pendingVoiceFrames: 0,
+    speechStartTs: null,
+    lastVoiceTs: null,
+    utteranceBuffers: [],
+    utteranceSamples: 0,
+    prerollBuffers: [],
+    prerollSamples: 0,
+    noiseFloor: null,
+    sampleRate: 48000,
+});
 
 export default function VideoChat() {
     const navigate = useNavigate();
@@ -87,7 +126,6 @@ export default function VideoChat() {
     const micPermissionStreamRef = useRef<MediaStream | null>(null);
     const isRequestingMicPermissionRef = useRef(false);
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-    const asrMimeTypeRef = useRef<string>('audio/webm');
     const asrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const asrBufferRef = useRef<ASRBuffer[]>([]);  // ASR 缓冲区
     const asrFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -102,6 +140,11 @@ export default function VideoChat() {
     const silentAudioContextRef = useRef<AudioContext | null>(null);
     const silentOscillatorRef = useRef<OscillatorNode | null>(null);
     const silentTrackRef = useRef<MediaStreamTrack | null>(null);
+    const localASRAudioContextRef = useRef<AudioContext | null>(null);
+    const localASRSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+    const localASRProcessorRef = useRef<ScriptProcessorNode | null>(null);
+    const localASRZeroGainRef = useRef<GainNode | null>(null);
+    const localASRStateRef = useRef<LocalASRState>(createInitialLocalASRState());
 
     // 兼容旧的 isAISpeaking（用于UI显示）
     const isAISpeaking = conversationState === ConversationState.TTS_PLAYING;
@@ -207,6 +250,170 @@ export default function VideoChat() {
             .toLowerCase()
             .replace(/[\s，。！？、,.!?;:：；"'“”‘’（）()【】\[\]-]/g, '')
             .trim();
+
+    const resetLocalASRState = () => {
+        localASRStateRef.current = createInitialLocalASRState();
+    };
+
+    const encodeWavFromFloat32 = (buffers: Float32Array[], sampleRate: number): Blob | null => {
+        if (!buffers.length) return null;
+        const totalSamples = buffers.reduce((sum, chunk) => sum + chunk.length, 0);
+        if (totalSamples <= 0) return null;
+
+        const pcm16 = new Int16Array(totalSamples);
+        let offset = 0;
+        for (const chunk of buffers) {
+            for (let i = 0; i < chunk.length; i += 1) {
+                const sample = Math.max(-1, Math.min(1, chunk[i]));
+                pcm16[offset + i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+            }
+            offset += chunk.length;
+        }
+
+        const byteRate = sampleRate * 2;
+        const blockAlign = 2;
+        const wavBuffer = new ArrayBuffer(44 + pcm16.byteLength);
+        const view = new DataView(wavBuffer);
+
+        const writeString = (viewRef: DataView, position: number, value: string) => {
+            for (let i = 0; i < value.length; i += 1) {
+                viewRef.setUint8(position + i, value.charCodeAt(i));
+            }
+        };
+
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + pcm16.byteLength, true);
+        writeString(view, 8, 'WAVE');
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        writeString(view, 36, 'data');
+        view.setUint32(40, pcm16.byteLength, true);
+
+        new Int16Array(wavBuffer, 44).set(pcm16);
+        return new Blob([wavBuffer], { type: 'audio/wav' });
+    };
+
+    const pushBufferedASRBlob = (audioBlob: Blob) => {
+        asrBufferRef.current.push({
+            audioBlob,
+            timestamp: Date.now(),
+        });
+        if (asrBufferRef.current.length > 3) {
+            asrBufferRef.current.shift();
+        }
+    };
+
+    const flushLocalASRUtterance = (reason: 'speech_end' | 'max_duration' | 'state_pause') => {
+        const state = localASRStateRef.current;
+        if (!state.speechActive || !state.utteranceBuffers.length) {
+            resetLocalASRState();
+            return;
+        }
+
+        const utteranceMs = (state.utteranceSamples / state.sampleRate) * 1000;
+        const wavBlob = encodeWavFromFloat32(state.utteranceBuffers, state.sampleRate);
+        resetLocalASRState();
+
+        if (!wavBlob || utteranceMs < LOCAL_ASR_MIN_UTTERANCE_MS) {
+            return;
+        }
+
+        console.log('[ASR] Finalized utterance:', { reason, utteranceMs: Math.round(utteranceMs), bytes: wavBlob.size });
+        if (conversationStateRef.current === ConversationState.LISTENING) {
+            sendAudioToBackend(wavBlob);
+        } else {
+            pushBufferedASRBlob(wavBlob);
+        }
+    };
+
+    const handleLocalASRAudioFrame = (inputChunk: Float32Array, sampleRate: number) => {
+        const state = localASRStateRef.current;
+        state.sampleRate = sampleRate;
+
+        const chunk = new Float32Array(inputChunk);
+        const now = performance.now();
+        let sumSquares = 0;
+        for (let i = 0; i < chunk.length; i += 1) {
+            const sample = chunk[i];
+            sumSquares += sample * sample;
+        }
+        const rms = Math.sqrt(sumSquares / Math.max(1, chunk.length));
+
+        const prerollMaxSamples = Math.max(1, Math.floor(sampleRate * (LOCAL_ASR_PREROLL_MS / 1000)));
+        state.prerollBuffers.push(chunk);
+        state.prerollSamples += chunk.length;
+        while (state.prerollSamples > prerollMaxSamples && state.prerollBuffers.length > 0) {
+            const removed = state.prerollBuffers.shift();
+            if (!removed) break;
+            state.prerollSamples -= removed.length;
+        }
+
+        if (conversationStateRef.current !== ConversationState.LISTENING) {
+            if (state.speechActive) {
+                flushLocalASRUtterance('state_pause');
+            } else {
+                state.pendingVoiceFrames = 0;
+            }
+            return;
+        }
+
+        if (!state.speechActive && rms < LOCAL_ASR_BASE_RMS) {
+            if (state.noiseFloor == null) {
+                state.noiseFloor = rms;
+            } else {
+                state.noiseFloor = (1 - LOCAL_ASR_NOISE_ALPHA) * state.noiseFloor + LOCAL_ASR_NOISE_ALPHA * rms;
+            }
+        }
+
+        const noiseFloor = state.noiseFloor ?? 0;
+        const speechThreshold = Math.max(LOCAL_ASR_BASE_RMS, noiseFloor * LOCAL_ASR_NOISE_MULTIPLIER + LOCAL_ASR_NOISE_MARGIN);
+        const continueThreshold = Math.max(LOCAL_ASR_BASE_RMS * 0.6, speechThreshold * LOCAL_ASR_CONTINUE_RATIO);
+        const isVoice = rms >= (state.speechActive ? continueThreshold : speechThreshold);
+
+        if (!state.speechActive) {
+            if (isVoice) {
+                state.pendingVoiceFrames += 1;
+                if (state.pendingVoiceFrames >= LOCAL_ASR_START_FRAMES) {
+                    state.speechActive = true;
+                    state.speechStartTs = now;
+                    state.lastVoiceTs = now;
+                    state.utteranceBuffers = [...state.prerollBuffers];
+                    state.utteranceSamples = state.prerollBuffers.reduce((sum, frame) => sum + frame.length, 0);
+                }
+            } else {
+                state.pendingVoiceFrames = 0;
+            }
+            return;
+        }
+
+        state.utteranceBuffers.push(chunk);
+        state.utteranceSamples += chunk.length;
+        if (isVoice) {
+            state.lastVoiceTs = now;
+        }
+
+        const utteranceMs = state.speechStartTs == null ? 0 : now - state.speechStartTs;
+        const silenceMs = state.lastVoiceTs == null ? 0 : now - state.lastVoiceTs;
+
+        if (utteranceMs >= LOCAL_ASR_MAX_UTTERANCE_MS) {
+            flushLocalASRUtterance('max_duration');
+            return;
+        }
+
+        const requiredSilenceMs = utteranceMs < LOCAL_ASR_SHORT_UTTERANCE_MS
+            ? LOCAL_ASR_END_SILENCE_SHORT_MS
+            : LOCAL_ASR_END_SILENCE_MS;
+
+        if (utteranceMs >= LOCAL_ASR_MIN_UTTERANCE_MS && silenceMs >= requiredSilenceMs) {
+            flushLocalASRUtterance('speech_end');
+        }
+    };
 
     const blobToBase64 = (audioBlob: Blob): Promise<string> => {
         return new Promise((resolve, reject) => {
@@ -541,113 +748,76 @@ export default function VideoChat() {
     // 初始化后端腾讯 ASR
     const initBackendASR = (stream: MediaStream) => {
         try {
-            if (mediaRecorderRef.current) {
+            if (localASRProcessorRef.current) {
                 try {
-                    if (mediaRecorderRef.current.state !== 'inactive') {
-                        mediaRecorderRef.current.stop();
-                    }
+                    localASRProcessorRef.current.disconnect();
                 } catch {
                     // ignore
                 }
-                mediaRecorderRef.current = null;
+                localASRProcessorRef.current.onaudioprocess = null;
+                localASRProcessorRef.current = null;
             }
-
-            // 检测支持的音频格式
-            const mimeTypes = [
-                'audio/webm;codecs=opus',
-                'audio/webm',
-                'audio/ogg;codecs=opus',
-                'audio/ogg',
-                'audio/mp4',
-            ];
-
-            let selectedMimeType = '';
-            for (const mimeType of mimeTypes) {
-                if (MediaRecorder.isTypeSupported(mimeType)) {
-                    selectedMimeType = mimeType;
-                    console.log('[ASR] Using mimeType:', mimeType);
-                    break;
+            if (localASRSourceRef.current) {
+                try {
+                    localASRSourceRef.current.disconnect();
+                } catch {
+                    // ignore
                 }
+                localASRSourceRef.current = null;
+            }
+            if (localASRZeroGainRef.current) {
+                try {
+                    localASRZeroGainRef.current.disconnect();
+                } catch {
+                    // ignore
+                }
+                localASRZeroGainRef.current = null;
+            }
+            if (localASRAudioContextRef.current) {
+                localASRAudioContextRef.current.close().catch(() => {
+                    // ignore
+                });
+                localASRAudioContextRef.current = null;
             }
 
-            if (!selectedMimeType) {
-                console.error('[ASR] No supported audio mimeType found');
-                message.error('浏览器不支持音频录制');
+            const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+            if (!AudioContextCtor) {
+                message.error('浏览器不支持 Web Audio');
                 setIsVoiceChatOn(false);
                 return;
             }
 
-            // 使用 MediaRecorder 录制音频
-            const mediaRecorder = new MediaRecorder(stream, {
-                mimeType: selectedMimeType,
+            resetLocalASRState();
+
+            const audioContext: AudioContext = new AudioContextCtor();
+            const source = audioContext.createMediaStreamSource(stream);
+            const processor = audioContext.createScriptProcessor(LOCAL_ASR_PROCESSOR_BUFFER_SIZE, 1, 1);
+            const zeroGain = audioContext.createGain();
+            zeroGain.gain.value = 0;
+
+            processor.onaudioprocess = (event) => {
+                const input = event.inputBuffer.getChannelData(0);
+                const output = event.outputBuffer.getChannelData(0);
+                output.fill(0);
+                handleLocalASRAudioFrame(new Float32Array(input), audioContext.sampleRate);
+            };
+
+            source.connect(processor);
+            processor.connect(zeroGain);
+            zeroGain.connect(audioContext.destination);
+            audioContext.resume().catch(() => {
+                // ignore
             });
 
-            // 记录实际使用的 mimeType
-            console.log('[ASR] MediaRecorder actual mimeType:', mediaRecorder.mimeType);
-
-            let recordingChunks: BlobPart[] = [];
-
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data && event.data.size > 0) {
-                    recordingChunks.push(event.data);
-                }
-            };
-
-            mediaRecorder.onstop = () => {
-                if (recordingChunks.length === 0) {
-                    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && isVoiceChatOn) {
-                        mediaRecorderRef.current.start();
-                    }
-                    return;
-                }
-
-                const audioBlob = new Blob(recordingChunks, { type: selectedMimeType });
-                recordingChunks = [];
-                console.log('[ASR] Blob size:', audioBlob.size, 'type:', audioBlob.type, 'state:', conversationStateRef.current);
-
-                if (conversationStateRef.current === ConversationState.LISTENING) {
-                    sendAudioToBackend(audioBlob);
-                } else if (conversationStateRef.current === ConversationState.LLM_PROCESSING ||
-                    conversationStateRef.current === ConversationState.TTS_PLAYING) {
-                    asrBufferRef.current.push({
-                        audioBlob: audioBlob,
-                        timestamp: Date.now()
-                    });
-                    if (asrBufferRef.current.length > 8) {
-                        asrBufferRef.current.shift();
-                    }
-                }
-
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive' && isVoiceChatOn) {
-                    mediaRecorderRef.current.start();
-                }
-            };
-
-            // 保存引用和 mimeType
-            mediaRecorderRef.current = mediaRecorder;
-            asrMimeTypeRef.current = selectedMimeType;
-
-            // 开始录音（stop/start 分段，确保每段都是可解码容器）
-            const startRecording = () => {
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-                    recordingChunks = [];
-                    mediaRecorderRef.current.start();
-                }
-            };
-
-            // 第一次开始录音
-            startRecording();
-
-            asrIntervalRef.current = setInterval(() => {
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-                    mediaRecorderRef.current.stop();
-                }
-            }, 850);
+            localASRAudioContextRef.current = audioContext;
+            localASRSourceRef.current = source;
+            localASRProcessorRef.current = processor;
+            localASRZeroGainRef.current = zeroGain;
 
             // 设置初始状态为 LISTENING
             setStateListening();
 
-            console.log('[ASR] Backend Tencent ASR started');
+            console.log('[ASR] Backend Tencent ASR started (PCM + VAD endpointing)');
             message.info('语音识别已启动（使用腾讯 ASR）');
         } catch (e) {
             console.error('[ASR] Failed to start backend ASR:', e);
@@ -742,7 +912,9 @@ export default function VideoChat() {
             upstreamMicTrackRef.current ||
             asrIntervalRef.current ||
             asrFlushTimerRef.current ||
-            upstreamReadyTimerRef.current
+            upstreamReadyTimerRef.current ||
+            localASRAudioContextRef.current ||
+            localASRProcessorRef.current
         );
 
         // 仅本地分片 ASR 模式需要 flush。WebRTC 上行模式直接丢弃本地缓存。
@@ -815,6 +987,39 @@ export default function VideoChat() {
         if (hadActiveASR) {
             console.log('[ASR] Backend ASR stopped:', reason);
         }
+
+        if (localASRProcessorRef.current) {
+            try {
+                localASRProcessorRef.current.disconnect();
+            } catch {
+                // ignore
+            }
+            localASRProcessorRef.current.onaudioprocess = null;
+            localASRProcessorRef.current = null;
+        }
+        if (localASRSourceRef.current) {
+            try {
+                localASRSourceRef.current.disconnect();
+            } catch {
+                // ignore
+            }
+            localASRSourceRef.current = null;
+        }
+        if (localASRZeroGainRef.current) {
+            try {
+                localASRZeroGainRef.current.disconnect();
+            } catch {
+                // ignore
+            }
+            localASRZeroGainRef.current = null;
+        }
+        if (localASRAudioContextRef.current) {
+            localASRAudioContextRef.current.close().catch(() => {
+                // ignore
+            });
+            localASRAudioContextRef.current = null;
+        }
+        resetLocalASRState();
     };
 
     const resetTimer = () => {

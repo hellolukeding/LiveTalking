@@ -55,19 +55,22 @@ const TTS_FALLBACK_TIMEOUT_MS = 2500;
 const TTS_END_SIGNAL_GRACE_MS = Number(import.meta.env.VITE_TTS_END_SIGNAL_GRACE_MS ?? 700);
 const USE_WEBRTC_UPSTREAM_ASR = String(import.meta.env.VITE_USE_WEBRTC_UPSTREAM_ASR ?? 'true').toLowerCase() === 'true';
 const AUTO_DISCONNECT_MS = Number(import.meta.env.VITE_AUTO_DISCONNECT_MS ?? 0);
-const LOCAL_ASR_MIN_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_MIN_UTTERANCE_MS ?? 450);
+const LOCAL_ASR_MIN_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_MIN_UTTERANCE_MS ?? 320);
 const LOCAL_ASR_END_SILENCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_END_SILENCE_MS ?? 700);
 const LOCAL_ASR_END_SILENCE_SHORT_MS = Number(import.meta.env.VITE_LOCAL_ASR_END_SILENCE_SHORT_MS ?? 950);
 const LOCAL_ASR_SHORT_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_SHORT_UTTERANCE_MS ?? 1800);
 const LOCAL_ASR_MAX_UTTERANCE_MS = Number(import.meta.env.VITE_LOCAL_ASR_MAX_UTTERANCE_MS ?? 10000);
-const LOCAL_ASR_BASE_RMS = Number(import.meta.env.VITE_LOCAL_ASR_BASE_RMS ?? 0.012);
-const LOCAL_ASR_CONTINUE_RATIO = Number(import.meta.env.VITE_LOCAL_ASR_CONTINUE_RATIO ?? 0.72);
+const LOCAL_ASR_BASE_RMS = Number(import.meta.env.VITE_LOCAL_ASR_BASE_RMS ?? 0.0065);
+const LOCAL_ASR_CONTINUE_RATIO = Number(import.meta.env.VITE_LOCAL_ASR_CONTINUE_RATIO ?? 0.62);
 const LOCAL_ASR_NOISE_ALPHA = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_ALPHA ?? 0.03);
-const LOCAL_ASR_NOISE_MULTIPLIER = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_MULTIPLIER ?? 3.0);
-const LOCAL_ASR_NOISE_MARGIN = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_MARGIN ?? 0.0025);
-const LOCAL_ASR_START_FRAMES = Number(import.meta.env.VITE_LOCAL_ASR_START_FRAMES ?? 3);
+const LOCAL_ASR_NOISE_MULTIPLIER = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_MULTIPLIER ?? 2.2);
+const LOCAL_ASR_NOISE_MARGIN = Number(import.meta.env.VITE_LOCAL_ASR_NOISE_MARGIN ?? 0.0015);
+const LOCAL_ASR_START_FRAMES = Number(import.meta.env.VITE_LOCAL_ASR_START_FRAMES ?? 2);
 const LOCAL_ASR_PREROLL_MS = Number(import.meta.env.VITE_LOCAL_ASR_PREROLL_MS ?? 220);
 const LOCAL_ASR_PROCESSOR_BUFFER_SIZE = Number(import.meta.env.VITE_LOCAL_ASR_PROCESSOR_BUFFER_SIZE ?? 2048);
+const MIC_ACTIVITY_RMS = Number(import.meta.env.VITE_MIC_ACTIVITY_RMS ?? 0.0032);
+const UPSTREAM_DEAF_TIMEOUT_MS = Number(import.meta.env.VITE_UPSTREAM_DEAF_TIMEOUT_MS ?? 2800);
+const UPSTREAM_WATCHDOG_INTERVAL_MS = Number(import.meta.env.VITE_UPSTREAM_WATCHDOG_INTERVAL_MS ?? 600);
 
 const createInitialLocalASRState = (): LocalASRState => ({
     speechActive: false,
@@ -146,6 +149,14 @@ export default function VideoChat() {
     const localASRProcessorRef = useRef<ScriptProcessorNode | null>(null);
     const localASRZeroGainRef = useRef<GainNode | null>(null);
     const localASRStateRef = useRef<LocalASRState>(createInitialLocalASRState());
+    const micMonitorAudioContextRef = useRef<AudioContext | null>(null);
+    const micMonitorSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+    const micMonitorProcessorRef = useRef<ScriptProcessorNode | null>(null);
+    const micMonitorZeroGainRef = useRef<GainNode | null>(null);
+    const lastMicVoiceDetectedAtRef = useRef<number>(0);
+    const lastAnyASRActivityAtRef = useRef<number>(0);
+    const upstreamWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const upstreamFallbackActivatedRef = useRef(false);
 
     // 兼容旧的 isAISpeaking（用于UI显示）
     const isAISpeaking = conversationState === ConversationState.TTS_PLAYING;
@@ -533,43 +544,210 @@ export default function VideoChat() {
         }
     };
 
-    const ensureMicStream = async (): Promise<MediaStream> => {
+    const buildAudioConstraints = (mode: 'default' | 'boosted'): MediaStreamConstraints => {
+        const supported = navigator.mediaDevices?.getSupportedConstraints?.() ?? {};
+        const audioConstraints: MediaTrackConstraints = {
+            channelCount: 1,
+            sampleRate: 48000,
+            sampleSize: 16,
+        };
+
+        if (supported.echoCancellation) {
+            audioConstraints.echoCancellation = true;
+        }
+        if (supported.autoGainControl) {
+            audioConstraints.autoGainControl = true;
+        }
+        if (supported.noiseSuppression) {
+            audioConstraints.noiseSuppression = mode === 'boosted' ? false : true;
+        }
+
+        return { audio: audioConstraints };
+    };
+
+    const ensureMicStream = async (
+        mode: 'default' | 'boosted' = 'default',
+        forceRefresh = false
+    ): Promise<MediaStream> => {
         const current = micPermissionStreamRef.current;
-        if (current) {
+        if (current && !forceRefresh) {
             const liveTrack = current.getAudioTracks().find(track => track.readyState === 'live');
             if (liveTrack) {
                 return current;
             }
+        }
+        if (current) {
             current.getTracks().forEach(track => track.stop());
             micPermissionStreamRef.current = null;
         }
 
-        const preferredConstraints: MediaStreamConstraints = {
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                channelCount: 1,
-                sampleRate: 48000,
-                sampleSize: 16,
-            }
-        };
-
         try {
-            return await navigator.mediaDevices.getUserMedia(preferredConstraints);
+            const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints(mode));
+            const track = stream.getAudioTracks()[0];
+            console.log('[ASR] Acquired microphone stream:', {
+                mode,
+                settings: track?.getSettings?.(),
+                constraints: track?.getConstraints?.(),
+            });
+            return stream;
         } catch (error: any) {
             if (error?.name !== 'OverconstrainedError') {
                 throw error;
             }
-            return navigator.mediaDevices.getUserMedia({
+            const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
-                    noiseSuppression: true,
                     autoGainControl: true,
                     channelCount: 1,
                 }
             });
+            const track = stream.getAudioTracks()[0];
+            console.log('[ASR] Acquired microphone stream with relaxed constraints:', {
+                mode,
+                settings: track?.getSettings?.(),
+                constraints: track?.getConstraints?.(),
+            });
+            return stream;
         }
+    };
+
+    const stopMicMonitor = () => {
+        if (upstreamWatchdogRef.current) {
+            clearInterval(upstreamWatchdogRef.current);
+            upstreamWatchdogRef.current = null;
+        }
+        if (micMonitorProcessorRef.current) {
+            try {
+                micMonitorProcessorRef.current.disconnect();
+            } catch {
+                // ignore
+            }
+            micMonitorProcessorRef.current.onaudioprocess = null;
+            micMonitorProcessorRef.current = null;
+        }
+        if (micMonitorSourceRef.current) {
+            try {
+                micMonitorSourceRef.current.disconnect();
+            } catch {
+                // ignore
+            }
+            micMonitorSourceRef.current = null;
+        }
+        if (micMonitorZeroGainRef.current) {
+            try {
+                micMonitorZeroGainRef.current.disconnect();
+            } catch {
+                // ignore
+            }
+            micMonitorZeroGainRef.current = null;
+        }
+        if (micMonitorAudioContextRef.current) {
+            micMonitorAudioContextRef.current.close().catch(() => {
+                // ignore
+            });
+            micMonitorAudioContextRef.current = null;
+        }
+    };
+
+    const startMicMonitor = (stream: MediaStream) => {
+        stopMicMonitor();
+        try {
+            const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+            if (!AudioContextCtor) {
+                return;
+            }
+            const audioContext: AudioContext = new AudioContextCtor();
+            const source = audioContext.createMediaStreamSource(stream);
+            const processor = audioContext.createScriptProcessor(1024, 1, 1);
+            const zeroGain = audioContext.createGain();
+            zeroGain.gain.value = 0;
+
+            processor.onaudioprocess = (event) => {
+                const input = event.inputBuffer.getChannelData(0);
+                const output = event.outputBuffer.getChannelData(0);
+                output.fill(0);
+                let sumSquares = 0;
+                for (let i = 0; i < input.length; i += 1) {
+                    const sample = input[i];
+                    sumSquares += sample * sample;
+                }
+                const rms = Math.sqrt(sumSquares / Math.max(1, input.length));
+                if (conversationStateRef.current === ConversationState.LISTENING && rms >= MIC_ACTIVITY_RMS) {
+                    lastMicVoiceDetectedAtRef.current = Date.now();
+                }
+            };
+
+            source.connect(processor);
+            processor.connect(zeroGain);
+            zeroGain.connect(audioContext.destination);
+            audioContext.resume().catch(() => {
+                // ignore
+            });
+
+            micMonitorAudioContextRef.current = audioContext;
+            micMonitorSourceRef.current = source;
+            micMonitorProcessorRef.current = processor;
+            micMonitorZeroGainRef.current = zeroGain;
+        } catch (error) {
+            console.warn('[ASR] Failed to start mic monitor:', error);
+        }
+    };
+
+    const markASRActivity = () => {
+        lastAnyASRActivityAtRef.current = Date.now();
+    };
+
+    const switchUpstreamToLocalFallback = async (reason: string) => {
+        if (upstreamFallbackActivatedRef.current) {
+            return;
+        }
+        try {
+            const boostedStream = await ensureMicStream('boosted', true);
+            micPermissionStreamRef.current = boostedStream;
+            startMicMonitor(boostedStream);
+
+            upstreamFallbackActivatedRef.current = true;
+            upstreamReadyRef.current = false;
+
+            try {
+                const sender = upstreamAudioSenderRef.current;
+                if (sender) {
+                    const silentTrack = createSilentUpstreamTrack();
+                    await sender.replaceTrack(silentTrack ?? null);
+                }
+            } catch (error) {
+                console.warn('[ASR] Failed to detach upstream mic track during fallback:', error);
+            }
+
+            console.warn('[ASR] Switching to local fallback due to upstream deafness:', reason);
+            message.warning('WebRTC 上行收音偏弱，已切换到本地增强 ASR');
+            initBackendASR(boostedStream);
+        } catch (error) {
+            console.error('[ASR] Failed to switch to local fallback:', error);
+        }
+    };
+
+    const startUpstreamWatchdog = () => {
+        if (upstreamWatchdogRef.current) {
+            clearInterval(upstreamWatchdogRef.current);
+        }
+        upstreamWatchdogRef.current = setInterval(() => {
+            if (!USE_WEBRTC_UPSTREAM_ASR || upstreamFallbackActivatedRef.current) {
+                return;
+            }
+            if (!isStarted || !isVoiceChatOn) {
+                return;
+            }
+            if (conversationStateRef.current !== ConversationState.LISTENING) {
+                return;
+            }
+            const now = Date.now();
+            const recentVoiceMs = now - lastMicVoiceDetectedAtRef.current;
+            const noAsrMs = now - lastAnyASRActivityAtRef.current;
+            if (recentVoiceMs <= 1200 && noAsrMs >= UPSTREAM_DEAF_TIMEOUT_MS) {
+                void switchUpstreamToLocalFallback('voice_detected_but_no_asr_result');
+            }
+        }, UPSTREAM_WATCHDOG_INTERVAL_MS);
     };
 
     const attachUpstreamAudioTrack = async (stream: MediaStream) => {
@@ -699,19 +877,24 @@ export default function VideoChat() {
                 }
                 logAudioDevices(devices);
 
-                const stream = await ensureMicStream();
+                const stream = await ensureMicStream('default');
                 if (cancelled) {
                     stream.getTracks().forEach(track => track.stop());
                     return;
                 }
 
                 micPermissionStreamRef.current = stream;
+                upstreamFallbackActivatedRef.current = false;
+                lastMicVoiceDetectedAtRef.current = 0;
+                lastAnyASRActivityAtRef.current = Date.now();
+                startMicMonitor(stream);
                 message.success({ content: '麦克风权限已授予', key: 'micPermission', duration: 2 });
                 console.log('[ASR] Microphone permission granted');
 
                 if (USE_WEBRTC_UPSTREAM_ASR) {
                     upstreamReadyRef.current = false;
                     await attachUpstreamAudioTrack(stream);
+                    startUpstreamWatchdog();
                     message.info('语音识别已启动（WebRTC 上行）');
 
                     if (upstreamReadyTimerRef.current) {
@@ -890,6 +1073,7 @@ export default function VideoChat() {
             try {
                 const text = await recognizeAudioBlob(audioBlob);
                 if (text) {
+                    markASRActivity();
                     const now = Date.now();
                     const last = lastAsrResultRef.current;
                     if (last && last.text === text && now - last.ts < ASR_DUPLICATE_WINDOW_MS) {
@@ -952,6 +1136,7 @@ export default function VideoChat() {
             clearTimeout(upstreamReadyTimerRef.current);
             upstreamReadyTimerRef.current = null;
         }
+        stopMicMonitor();
         upstreamReadyRef.current = false;
 
         // 停止录音
@@ -1031,6 +1216,7 @@ export default function VideoChat() {
             localASRAudioContextRef.current = null;
         }
         resetLocalASRState();
+        upstreamFallbackActivatedRef.current = false;
     };
 
     const resetTimer = () => {
@@ -1168,6 +1354,7 @@ export default function VideoChat() {
                     if (!text) {
                         return;
                     }
+                    markASRActivity();
 
                     const now = Date.now();
                     const last = lastAsrResultRef.current;

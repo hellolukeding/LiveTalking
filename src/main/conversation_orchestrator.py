@@ -52,9 +52,9 @@ class VADConfig:
     sample_rate_out: int = 16000
     # VAD thresholds are RMS in [0,1]. Defaults bias slightly towards sensitivity;
     # a noise-adaptive floor (below) helps avoid false triggers in noisy rooms.
-    rms_speech: float = 0.0045
-    rms_barge_in: float = 0.008
-    rms_continue_ratio: float = 0.65
+    rms_speech: float = 0.0032
+    rms_barge_in: float = 0.012
+    rms_continue_ratio: float = 0.58
     end_silence_ms: int = 650
     end_silence_short_ms: int = 900
     short_utterance_ms: int = 1800
@@ -62,14 +62,14 @@ class VADConfig:
     max_utterance_ms: int = 8000
     cooldown_ms: int = 180
     dedup_window_ms: int = 1500
-    barge_in_ms: int = 90
+    barge_in_ms: int = 180
     barge_in_preroll_ms: int = 320
     tts_queue_hold_ms: int = 1200
     enable_orchestrator: bool = True
     noise_adapt: bool = True
     noise_alpha: float = 0.05
-    noise_multiplier: float = 2.5
-    noise_margin: float = 0.0010
+    noise_multiplier: float = 2.1
+    noise_margin: float = 0.0008
     noise_max_factor: float = 2.8
     debug_rms: bool = False
 
@@ -77,9 +77,9 @@ class VADConfig:
     def from_env(cls) -> "VADConfig":
         return cls(
             sample_rate_out=_env_int("ORCH_ASR_SR", 16000),
-            rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.0045),
-            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.008),
-            rms_continue_ratio=_env_float("ORCH_VAD_RMS_CONTINUE_RATIO", 0.65),
+            rms_speech=_env_float("ORCH_VAD_RMS_SPEECH", 0.0032),
+            rms_barge_in=_env_float("ORCH_VAD_RMS_BARGE_IN", 0.012),
+            rms_continue_ratio=_env_float("ORCH_VAD_RMS_CONTINUE_RATIO", 0.58),
             end_silence_ms=_env_int("ORCH_VAD_END_SILENCE_MS", 650),
             end_silence_short_ms=_env_int("ORCH_VAD_END_SILENCE_SHORT_MS", 900),
             short_utterance_ms=_env_int("ORCH_VAD_SHORT_UTTERANCE_MS", 1800),
@@ -87,14 +87,14 @@ class VADConfig:
             max_utterance_ms=_env_int("ORCH_VAD_MAX_UTTERANCE_MS", 8000),
             cooldown_ms=_env_int("ORCH_ASR_COOLDOWN_MS", 180),
             dedup_window_ms=_env_int("ORCH_ASR_DEDUP_WINDOW_MS", 1500),
-            barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 90),
+            barge_in_ms=_env_int("ORCH_BARGE_IN_MS", 180),
             barge_in_preroll_ms=_env_int("ORCH_BARGE_IN_PREROLL_MS", 320),
             tts_queue_hold_ms=_env_int("ORCH_TTS_QUEUE_HOLD_MS", 1200),
             enable_orchestrator=_env_bool("ORCH_ENABLED", True),
             noise_adapt=_env_bool("ORCH_VAD_NOISE_ADAPT", True),
             noise_alpha=_env_float("ORCH_VAD_NOISE_ALPHA", 0.05),
-            noise_multiplier=_env_float("ORCH_VAD_NOISE_MULT", 2.5),
-            noise_margin=_env_float("ORCH_VAD_NOISE_MARGIN", 0.0010),
+            noise_multiplier=_env_float("ORCH_VAD_NOISE_MULT", 2.1),
+            noise_margin=_env_float("ORCH_VAD_NOISE_MARGIN", 0.0008),
             noise_max_factor=_env_float("ORCH_VAD_NOISE_MAX_FACTOR", 2.8),
             debug_rms=_env_bool("ORCH_VAD_DEBUG", False),
         )
